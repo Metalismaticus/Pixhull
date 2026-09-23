@@ -57,6 +57,19 @@ export class History {
     return this.cursor < this.stack.length;
   }
 
+  /**
+   * Has the user changed the model by hand since the last clear()?
+   *
+   * The history is cleared exactly where the volume is replaced, so "there is
+   * something to undo" is the same question as "a rebuild would throw work
+   * away". An open stroke counts too: the pointer can still be down when a
+   * hotkey fires. Undoing everything back to the build makes this false again,
+   * which is right - there is then nothing left to lose.
+   */
+  get hasEdits() {
+    return this.cursor > 0 || !!(this.pending && this.pending.size > 0);
+  }
+
   /** Open a stroke. Safe to call when one is already open. */
   begin() {
     if (!this.pending) this.pending = new Map();

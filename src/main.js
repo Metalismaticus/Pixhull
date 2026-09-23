@@ -158,30 +158,34 @@ function buildSlots() {
 function slotAction(name, act) {
   const view = state.views.get(name);
   if (!view) return;
-  // Any manual change to how a view sits takes it out of the solvers' hands.
-  if (act === 'r') {
-    view.rotate = (view.rotate + 90) % 360;
-    view.orientLocked = true;
-  } else if (act === 'h') {
-    view.flipH = !view.flipH;
-    view.orientLocked = true;
-  } else if (act === 'v') {
-    view.flipV = !view.flipV;
-    view.orientLocked = true;
-  }
-  if (act === 'x') state.views.delete(name);
-  refreshSlots();
-  build();
+  guardRebuild(() => {
+    // Any manual change to how a view sits takes it out of the solvers' hands.
+    if (act === 'r') {
+      view.rotate = (view.rotate + 90) % 360;
+      view.orientLocked = true;
+    } else if (act === 'h') {
+      view.flipH = !view.flipH;
+      view.orientLocked = true;
+    } else if (act === 'v') {
+      view.flipV = !view.flipV;
+      view.orientLocked = true;
+    }
+    if (act === 'x') state.views.delete(name);
+    refreshSlots();
+    build();
+  });
 }
 
 /** @param {string} name @param {Blob} file */
 async function loadInto(name, file) {
   try {
     const img = await decodeImage(file);
-    setView(name, img);
-    autoGrid();
-    refreshSlots();
-    build();
+    guardRebuild(() => {
+      setView(name, img);
+      autoGrid();
+      refreshSlots();
+      build();
+    });
   } catch (err) {
     status('status.badImage', { err: String(err instanceof Error ? err.message : err) }, 'error');
   }
@@ -262,6 +266,38 @@ function autoGrid() {
   const pick = options.find((v) => v >= need) ?? options[options.length - 1];
   select.value = String(pick);
   state.gridSize = pick;
+}
+
+// ---------------------------------------------------------- rebuild guard
+
+/**
+ * Hand edits live only in the volume, and every rebuild throws that volume
+ * away together with the undo history. Ask before that happens.
+ *
+ * Only when there is something to lose, though: changing the grid, flipping a
+ * view or pressing Demo on an untouched model is the normal working loop, and
+ * a question on every click would be worse than the disease.
+ *
+ * @returns {boolean} true when the caller may go ahead and replace the model
+ */
+function mayDiscardEdits() {
+  if (!state.history.hasEdits) return true;
+  if (window.confirm(t('edit.rebuildWarning') + '\n\n' + t('edit.rebuildConfirm'))) return true;
+  status('edit.rebuildKept', undefined, 'warn');
+  return false;
+}
+
+/**
+ * @param {() => void} proceed what replaces the model
+ * @param {() => void} [revert] put back the control the user just moved, so a
+ *   refused rebuild does not leave the panel describing a model that is not there
+ */
+function guardRebuild(proceed, revert) {
+  if (mayDiscardEdits()) {
+    proceed();
+    return;
+  }
+  if (revert) revert();
 }
 
 // ------------------------------------------------------------------ build
@@ -549,6 +585,7 @@ function refreshSheetCells() {
 
 function applySheet() {
   if (!sheet) return;
+  const src = sheet;
 
   /** @type {Array<[string, number]>} */
   const chosen = [];
@@ -558,16 +595,18 @@ function applySheet() {
   }
   if (chosen.length === 0) return;
 
-  // A sheet replaces the whole set of views. Keeping leftovers from an earlier
-  // load would quietly carve against art the artist has already moved on from.
-  state.views.clear();
-  for (const [name, index] of chosen) {
-    const crop = cropCell(sheet.image, sheet.cells[index]);
-    setView(name, /** @type {any} */ (crop));
-  }
-  autoGrid();
-  refreshSlots();
-  build();
+  guardRebuild(() => {
+    // A sheet replaces the whole set of views. Keeping leftovers from an earlier
+    // load would quietly carve against art the artist has already moved on from.
+    state.views.clear();
+    for (const [name, index] of chosen) {
+      const crop = cropCell(src.image, src.cells[index]);
+      setView(name, /** @type {any} */ (crop));
+    }
+    autoGrid();
+    refreshSlots();
+    build();
+  });
 }
 
 // ----------------------------------------------------------------- editor
@@ -1105,6 +1144,10 @@ async function loadProject(file) {
   try {
     const data = JSON.parse(await file.text());
     if (data.format !== 'pixhull-project') throw new Error('Not a Pixhull project file');
+    // Both branches below replace the model - the saved-voxels one clears the
+    // history too, because its entries point at coordinates of a volume that is
+    // about to be gone. So the question belongs here, before anything is lost.
+    if (!mayDiscardEdits()) return;
     state.views.clear();
     for (const name of VIEW_NAMES) {
       const v = data.views?.[name];
@@ -1195,14 +1238,16 @@ function frame() {
 // ------------------------------------------------------------------- init
 
 function loadDemo() {
-  const demo = buildDemoViews();
-  state.views.clear();
-  setView('front', demo.front);
-  setView('right', demo.right);
-  setView('top', demo.top);
-  autoGrid();
-  refreshSlots();
-  build();
+  guardRebuild(() => {
+    const demo = buildDemoViews();
+    state.views.clear();
+    setView('front', demo.front);
+    setView('right', demo.right);
+    setView('top', demo.top);
+    autoGrid();
+    refreshSlots();
+    build();
+  });
 }
 
 // ------------------------------------------------------- theme & language
@@ -1292,24 +1337,35 @@ function init() {
     retranslate();
   });
 
-  $('mirror-toggle').addEventListener('change', build);
+  $('mirror-toggle').addEventListener('change', (e) => {
+    const box = /** @type {HTMLInputElement} */ (e.target);
+    guardRebuild(build, () => { box.checked = !box.checked; });
+  });
 
   $('btn-demo').addEventListener('click', loadDemo);
   $('btn-demo-2').addEventListener('click', loadDemo);
   $('btn-clear').addEventListener('click', () => {
-    state.views.clear();
-    refreshSlots();
-    build();
+    guardRebuild(() => {
+      state.views.clear();
+      refreshSlots();
+      build();
+    });
   });
-  $('btn-build').addEventListener('click', build);
+  $('btn-build').addEventListener('click', () => guardRebuild(build));
   $('btn-autofit').addEventListener('click', () => {
-    autoGrid();
-    build();
+    guardRebuild(() => {
+      autoGrid();
+      build();
+    });
   });
 
   $('grid-size').addEventListener('change', (e) => {
-    state.gridSize = +(/** @type {HTMLSelectElement} */ (e.target).value);
-    build();
+    const select = /** @type {HTMLSelectElement} */ (e.target);
+    const previous = String(state.gridSize);
+    guardRebuild(() => {
+      state.gridSize = +select.value;
+      build();
+    }, () => { select.value = previous; });
   });
 
   $('shade-toggle').addEventListener('change', (e) => {
