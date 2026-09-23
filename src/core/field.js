@@ -34,7 +34,7 @@ export function densityField(vol, box, radius) {
   const nx = box.max[0] - box.min[0] + 1 + 2 * pad;
   const ny = box.max[1] - box.min[1] + 1 + 2 * pad;
   const nz = box.max[2] - box.min[2] + 1 + 2 * pad;
-  const data = new Float32Array(nx * ny * nz);
+  let data = new Float32Array(nx * ny * nz);
   const at = (i, j, k) => (k * ny + j) * nx + i;
 
   for (let k = 0; k < nz; k++) {
@@ -44,6 +44,9 @@ export function densityField(vol, box, radius) {
       }
     }
   }
+  // Kept so the caller does not have to read the whole volume a second time to
+  // find its exposed faces. At 384 that second pass cost a second on its own.
+  const occupied = Uint8Array.from(data);
 
   const width = 2 * radius + 1;
   const line = new Float32Array(Math.max(nx, ny, nz));
@@ -65,11 +68,32 @@ export function densityField(vol, box, radius) {
   for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) blur(at(i, j, 0), nx * ny, nz);
 
   return {
+    /**
+     * Drop the blurred field, keeping the occupancy.
+     *
+     * At 512 the blurred copy is 168 MB and nothing wants it once the surface
+     * directions have been read, while the occupancy is a twentieth the size
+     * and is still worth keeping.
+     */
+    releaseGradient() {
+      data = null;
+    },
+
+    /** Is this voxel solid? Reads the copy taken before blurring. */
+    solid(x, y, z) {
+      const i = x - ox;
+      const j = y - oy;
+      const k = z - oz;
+      if (i < 0 || j < 0 || k < 0 || i >= nx || j >= ny || k >= nz) return false;
+      return occupied[at(i, j, k)] === 1;
+    },
+
     /** Gradient at a voxel centre, in voxel-index space; null outside the box. */
     grad(x, y, z) {
       const i = x - ox;
       const j = y - oy;
       const k = z - oz;
+      if (!data) return null;
       if (i < 1 || j < 1 || k < 1 || i >= nx - 1 || j >= ny - 1 || k >= nz - 1) return null;
       return [
         data[at(i + 1, j, k)] - data[at(i - 1, j, k)],
@@ -89,6 +113,9 @@ export const FACE_DIRS = [
   [0, 1, 0], [0, -1, 0],
   [0, 0, 1], [0, 0, -1],
 ];
+
+/** How square-on the surface must face a direction before that direction is used. */
+const CONFIDENT = 0.5;
 
 /** How close two directions have to be before the choice counts as tied. */
 const TIE = 0.08;
@@ -130,5 +157,9 @@ export function facingOf(field, x, y, z) {
       best = d;
     }
   }
-  return bestDot > 0 ? best : -1;
+  // A surface has to point somewhere definite before its direction is worth
+  // acting on. Through a chassis rail two voxels thick the blur sees as much
+  // air as metal and the gradient wanders; taking a colour on that evidence
+  // is how white flecks arrived on the underside of the lorry.
+  return bestDot > CONFIDENT ? best : -1;
 }

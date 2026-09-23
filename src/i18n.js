@@ -47,6 +47,7 @@ const STRINGS = {
     'views.mirrored': 'mirrored',
 
     'grid.label': 'Grid',
+    'grid.hint': 'The grid is how many voxels the model is allowed to be across. Above the size of your art it only makes the voxels smaller than a pixel; below it, detail is thrown away. 384 and 512 are for art larger than 256 px a side and cost seconds, not milliseconds.',
     'grid.fit': 'Fit to art',
     'grid.build': 'Build model',
 
@@ -238,6 +239,7 @@ const STRINGS = {
     'views.mirrored': 'зеркало',
 
     'grid.label': 'Сетка',
+    'grid.hint': 'Сетка — во сколько вокселей укладывается модель. Выше размера вашего арта она только дробит пиксель, ниже — выбрасывает детали. 384 и 512 нужны для арта крупнее 256 пикселей по стороне и стоят секунд, а не миллисекунд.',
     'grid.fit': 'Подогнать',
     'grid.build': 'Собрать модель',
 

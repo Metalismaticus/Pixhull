@@ -15,7 +15,7 @@
  * views also generate phantom volume where their projections cross.
  */
 
-import { Volume, DIRS } from './volume.js';
+import { Volume, DIRS, DIR_PX, DIR_NX, DIR_PY, DIR_NY, DIR_PZ, DIR_NZ } from './volume.js';
 import { VIEW_GEOM, VIEW_NAMES } from './views.js';
 import { findLookalikeViews } from './diagnose.js';
 import { densityField, facingOf, FACE_DIRS } from './field.js';
@@ -145,9 +145,16 @@ export function carve(views, N, palette, opts = {}) {
     }
   }
 
-  const { painted, dominant } = paintFromViews(vol, raster, N);
-  if (opts.slopeColour !== false) repaintSlopes(vol, raster, N);
-  const inferred = inferMissingFaces(vol, dominant);
+  // One blurred copy of the model serves both passes below: the repaint reads
+  // surface directions off it, and the inference reads its occupancy instead of
+  // asking the chunked store about every neighbour of every voxel.
+  const box = vol.bounds();
+  const field = box ? densityField(vol, box, 2) : null;
+
+  const { painted, dominant, seen } = paintFromViews(vol, raster, N);
+  if (field && opts.slopeColour !== false) repaintSlopes(vol, raster, N, seen, field, box);
+  field?.releaseGradient();
+  const inferred = inferMissingFaces(vol, dominant, field);
 
   return {
     volume: vol,
@@ -234,39 +241,23 @@ function mirrorRaster(src, N, axis) {
  * @param {Record<string, {mask: Uint8Array, color: Uint8Array}>} raster
  * @param {number} N
  */
-function repaintSlopes(vol, raster, N) {
-  const box = vol.bounds();
-  if (!box) return;
-  const field = densityField(vol, box, 2);
+function repaintSlopes(vol, raster, N, seen, field, box) {
   /** face index -> the view that stares down it */
   const facing = {};
   for (const name of Object.keys(raster)) facing[VIEW_GEOM[name].face] = name;
 
-  // Occupancy read into a flat array first. Finding the exposed faces asks
-  // about seven voxels each, and on a three-million-voxel model going through
-  // the chunked store that many times costs more than the rest of the pass.
-  const bx = box.max[0] - box.min[0] + 3;
-  const by = box.max[1] - box.min[1] + 3;
-  const bz = box.max[2] - box.min[2] + 3;
-  const solid = new Uint8Array(bx * by * bz);
-  const at = (x, y, z) =>
-    ((z - box.min[2] + 1) * by + (y - box.min[1] + 1)) * bx + (x - box.min[0] + 1);
-  for (let z = box.min[2] - 1; z <= box.max[2] + 1; z++) {
-    for (let y = box.min[1] - 1; y <= box.max[1] + 1; y++) {
-      for (let x = box.min[0] - 1; x <= box.max[0] + 1; x++) {
-        if (vol.get(x, y, z)) solid[at(x, y, z)] = 1;
-      }
-    }
-  }
+  // The field already read the whole volume once to build itself, and kept
+  // the occupancy; asking it saves a second pass over three million voxels.
+  const at = (x, y, z) => field.solid(x, y, z);
 
   for (let z = box.min[2]; z <= box.max[2]; z++) {
     for (let y = box.min[1]; y <= box.max[1]; y++) {
       for (let x = box.min[0]; x <= box.max[0]; x++) {
-        if (!solid[at(x, y, z)]) continue;
+        if (!at(x, y, z)) continue;
         let want = -1;
         for (let d = 0; d < 6; d++) {
           const [ox, oy, oz] = FACE_DIRS[d];
-          if (solid[at(x + ox, y + oy, z + oz)]) continue;
+          if (at(x + ox, y + oy, z + oz)) continue;
           // Only worth the lookup once we know some face here is exposed.
           if (want === -1) {
             want = facingOf(field, x, y, z);
@@ -275,9 +266,16 @@ function repaintSlopes(vol, raster, N) {
           if (d === want) continue;
           const name = facing[want];
           if (!name) continue;
-          const [u, v] = VIEW_GEOM[name].uv(x, y, z, N);
+          const geom = VIEW_GEOM[name];
+          const [u, v] = geom.uv(x, y, z, N);
           const o = v * N + u;
           if (!raster[name].mask[o]) continue;
+          // That pixel belongs to whatever this view saw first along the ray.
+          // Handing it to a voxel hidden behind something else paints the
+          // underside of a lorry with the white of its flank, doubles a row of
+          // tail lights onto the voxels behind them, and puts white corners on
+          // a red cab - all reported, all the same mistake.
+          if (seen[name][o] !== depthAlong(geom.face, x, y, z, N)) continue;
           vol.setFace(x, y, z, d, raster[name].color[o]);
         }
       }
@@ -294,9 +292,13 @@ function repaintSlopes(vol, raster, N) {
 function paintFromViews(vol, raster, N) {
   let painted = 0;
   const histogram = new Uint32Array(256);
+  /** view name -> how far along each ray the first voxel sat, or -1 */
+  const seen = {};
   for (const name of Object.keys(raster)) {
     const geom = VIEW_GEOM[name];
     const { mask, color } = raster[name];
+    const depth = new Int32Array(N * N).fill(-1);
+    seen[name] = depth;
     for (let v = 0; v < N; v++) {
       for (let u = 0; u < N; u++) {
         const o = v * N + u;
@@ -307,6 +309,7 @@ function paintFromViews(vol, raster, N) {
           vol.setFace(x, y, z, geom.face, color[o]);
           histogram[color[o]]++;
           painted++;
+          depth[o] = d;
           break;
         }
       }
@@ -321,7 +324,24 @@ function paintFromViews(vol, raster, N) {
       dominant = i;
     }
   }
-  return { painted, dominant };
+  return { painted, dominant, seen };
+}
+
+/**
+ * How far along a view's ray a voxel sits, so its own depth can be compared
+ * with the depth of whatever that view actually saw first.
+ *
+ * @param {number} face the face index the view paints
+ */
+function depthAlong(face, x, y, z, N) {
+  switch (face) {
+    case DIR_PX: return N - 1 - x;
+    case DIR_NX: return x;
+    case DIR_PY: return N - 1 - y;
+    case DIR_NY: return y;
+    case DIR_PZ: return N - 1 - z;
+    default: return z;
+  }
 }
 
 /**
@@ -339,10 +359,13 @@ function paintFromViews(vol, raster, N) {
  * @param {number} fallback palette index used when nothing can be borrowed
  * @returns {number} faces filled in this way
  */
-function inferMissingFaces(vol, fallback = 1) {
+function inferMissingFaces(vol, fallback = 1, field = null) {
   const nx = vol.nx;
   const ny = vol.ny;
   const index = (x, y, z) => x + nx * (y + ny * z);
+  // Asking the field is an array read; asking the volume walks a chunk table.
+  // On a twenty-five-million-voxel model the difference is fourteen seconds.
+  const filled = field ? field.solid : (x, y, z) => vol.get(x, y, z);
 
   // Only surface voxels matter - the interior has no faces to colour, and
   // leaving it out keeps this proportional to the model's skin rather than its
@@ -355,11 +378,14 @@ function inferMissingFaces(vol, fallback = 1) {
     let seen = 0;
     for (let d = 0; d < 6; d++) {
       const [dx, dy, dz] = DIRS[d];
-      if (!vol.get(x + dx, y + dy, z + dz)) exposed = true;
-      const c = vol.getFace(x, y, z, d);
-      if (c !== 0 && seen === 0) seen = c;
+      if (!filled(x + dx, y + dy, z + dz)) exposed = true;
     }
-    if (exposed) own.set(index(x, y, z), seen);
+    if (!exposed) return;
+    for (let d = 0; d < 6; d++) {
+      const c = vol.getFace(x, y, z, d);
+      if (c !== 0) { seen = c; break; }
+    }
+    own.set(index(x, y, z), seen);
   });
 
   // Breadth-first from every voxel a view actually reached, so an uncoloured
@@ -391,10 +417,12 @@ function inferMissingFaces(vol, fallback = 1) {
 
   let inferred = 0;
   vol.forEachSolid((x, y, z) => {
-    const c = own.get(index(x, y, z)) || fallback;
+    const i = index(x, y, z);
+    if (!own.has(i)) return;
+    const c = own.get(i) || fallback;
     for (let d = 0; d < 6; d++) {
       const [dx, dy, dz] = DIRS[d];
-      if (vol.get(x + dx, y + dy, z + dz)) continue;
+      if (filled(x + dx, y + dy, z + dz)) continue;
       if (vol.getFace(x, y, z, d) !== 0) continue;
       vol.setFace(x, y, z, d, c);
       inferred++;
