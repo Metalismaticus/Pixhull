@@ -149,6 +149,7 @@ export const STRINGS = {
     'edit.symmetryX': 'Mirror edits across X',
     'edit.newColor': 'Pick a colour to add to the palette',
     'edit.addColor': 'Add colour',
+    'edit.recolour': 'double-click to change this colour',
     'edit.undo': 'Undo',
     'edit.redo': 'Redo',
     'edit.hint': 'Left-drag applies the tool; hold Shift to orbit, Ctrl to pan. Ctrl+Z undoes a whole stroke.',
@@ -171,6 +172,7 @@ export const STRINGS = {
     'status.nothingToUndo': 'Nothing to undo',
     'status.colorAdded': 'Palette now has {n} colours',
     'status.paletteFull': 'Palette is full at 255 colours',
+    'status.colorReplaced': 'Colour {n} is now {hex}',
 
     'dl.tagline': "run it locally, let an assistant drive it",
     'dl.backToApp': "Back to the app",
@@ -344,6 +346,7 @@ export const STRINGS = {
     'edit.symmetryX': 'Зеркалить правки по X',
     'edit.newColor': 'Выберите цвет для палитры',
     'edit.addColor': 'Добавить цвет',
+    'edit.recolour': 'двойной щелчок — сменить цвет',
     'edit.undo': 'Отменить',
     'edit.redo': 'Вернуть',
     'edit.hint': 'Левая кнопка применяет инструмент; Shift — вращение, Ctrl — панорама. Ctrl+Z отменяет весь мазок целиком.',
@@ -366,6 +369,7 @@ export const STRINGS = {
     'status.nothingToUndo': 'Отменять нечего',
     'status.colorAdded': 'В палитре теперь цветов: {n}',
     'status.paletteFull': 'Палитра заполнена: 255 цветов',
+    'status.colorReplaced': 'Цвет {n} теперь {hex}',
 
     'dl.tagline': "запустить локально и отдать ассистенту",
     'dl.backToApp': "Назад в приложение",

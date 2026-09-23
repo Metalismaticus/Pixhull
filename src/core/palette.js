@@ -132,6 +132,44 @@ export class Palette {
   }
 
   /**
+   * Recolour one slot in place, keeping its index.
+   *
+   * This is the whole point of an indexed model: a face stores a byte, so
+   * changing what that byte *means* recolours the model without touching a
+   * single voxel - one 1 KB texture upload, the same cost at 32 as at 512.
+   * Renumbering indices would do the opposite and turn every stored byte,
+   * including every one sitting in the undo history, into a lie.
+   *
+   * The lookup table is the only thing that needs care. The old colour's key
+   * is dropped only when this index is the one that owns it, so a duplicate
+   * colour elsewhere in the palette keeps answering for it; the new key is
+   * installed only when nobody owns it yet, so an existing slot of that colour
+   * stays the canonical home and `add()` keeps returning one index per colour.
+   *
+   * Source colours that a quantised import aliased onto this slot stay aliased:
+   * they name the material, and the material is what just changed.
+   *
+   * @param {number} i index in 1..size-1
+   * @param {number} r 0..255 @param {number} g 0..255 @param {number} b 0..255
+   * @returns {boolean} true when the slot actually changed
+   */
+  replace(i, r, g, b) {
+    if (!Number.isInteger(i) || i < 1 || i >= this.colors.length) return false;
+    const key = ((r & 255) << 16) | ((g & 255) << 8) | (b & 255);
+    const old = this.colors[i] | 0;
+    if (old === key) return false;
+    if (this.lookup.get(old) === i) this.lookup.delete(old);
+    this.colors[i] = key;
+    if (!this.lookup.has(key)) this.lookup.set(key, i);
+    // The Lab cache is keyed by palette *length*, which did not change here.
+    // Dropping it is mandatory, not tidiness: `nearest()` would otherwise keep
+    // matching against the colour this slot used to hold.
+    this._labs = null;
+    this._labsFor = -1;
+    return true;
+  }
+
+  /**
    * @param {number} i
    * @returns {[number, number, number]}
    */

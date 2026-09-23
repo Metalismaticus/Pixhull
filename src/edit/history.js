@@ -37,16 +37,37 @@ function writeVoxel(vol, x, y, z, s) {
   for (let d = 0; d < 6; d++) vol.setFace(x, y, z, d, s.faces[d]);
 }
 
+/**
+ * @typedef {Map<number, {x: number, y: number, z: number, before: VoxelState, after: VoxelState}>} StrokeMap
+ */
+
+/**
+ * One undoable step. Entries are tagged because the stack now carries two
+ * unrelated kinds of change, and undo has to know which object to write to.
+ * @typedef {{kind: 'voxels', map: StrokeMap}
+ *   | {kind: 'palette', index: number, before: number, after: number}} Entry
+ */
+
 export class History {
   /** @param {number} limit how many strokes to keep */
   constructor(limit = 120) {
     this.limit = limit;
-    /** @type {Array<Map<number, {x: number, y: number, z: number, before: VoxelState, after: VoxelState}>>} */
+    /** @type {Entry[]} */
     this.stack = [];
     /** index of the next slot; everything at or after it is redoable */
     this.cursor = 0;
-    /** @type {Map<number, {x: number, y: number, z: number, before: VoxelState, after: VoxelState}> | null} */
+    /** @type {StrokeMap | null} */
     this.pending = null;
+    /**
+     * Slot whose colour the open picker drag is rewriting, or null.
+     *
+     * A colour picker fires `input` for every pixel the user drags across, and
+     * each one is a real change to the model. Without this, one drag would
+     * leave dozens of undo steps and Ctrl+Z would crawl back through the
+     * gradient instead of returning the original colour.
+     * @type {number | null}
+     */
+    this.paletteDrag = null;
   }
 
   get canUndo() {
@@ -68,6 +89,40 @@ export class History {
    */
   get hasEdits() {
     return this.cursor > 0 || !!(this.pending && this.pending.size > 0);
+  }
+
+  /**
+   * Record a colour swapped in place, coalescing a picker drag into one step.
+   *
+   * `before` is the colour of the slot when the drag began, not the previous
+   * `input` - that is what makes one Ctrl+Z restore the original rather than
+   * the second-to-last shade the pointer passed over.
+   *
+   * @param {number} index palette slot
+   * @param {number} before packed 0xRRGGBB before the drag
+   * @param {number} after packed 0xRRGGBB now
+   * @returns {boolean} true when a new step was pushed (false when coalesced)
+   */
+  pushPalette(index, before, after) {
+    const top = this.cursor > 0 ? this.stack[this.cursor - 1] : null;
+    if (this.paletteDrag === index && top && top.kind === 'palette' && top.index === index) {
+      top.after = after;
+      return false;
+    }
+    this.stack.length = this.cursor; // a new step drops the redo tail
+    this.stack.push({ kind: 'palette', index, before, after });
+    if (this.stack.length > this.limit) this.stack.shift();
+    this.cursor = this.stack.length;
+    this.paletteDrag = index;
+    return true;
+  }
+
+  /**
+   * Close the picker drag, so the next colour change starts its own step.
+   * Cheap and idempotent; call it on pointer-up, `change` or blur.
+   */
+  endPalette() {
+    this.paletteDrag = null;
   }
 
   /** Open a stroke. Safe to call when one is already open. */
@@ -108,33 +163,72 @@ export class History {
     if (!changed) return false;
 
     this.stack.length = this.cursor; // a new stroke drops the redo tail
-    this.stack.push(map);
+    this.stack.push({ kind: 'voxels', map });
     if (this.stack.length > this.limit) this.stack.shift();
     this.cursor = this.stack.length;
+    this.paletteDrag = null;
     return true;
   }
 
-  /** @param {import('../core/volume.js').Volume} vol @returns {boolean} */
-  undo(vol) {
-    if (!this.canUndo) return false;
-    const map = this.stack[--this.cursor];
-    for (const e of map.values()) writeVoxel(vol, e.x, e.y, e.z, e.before);
-    return true;
+  /**
+   * @param {import('../core/volume.js').Volume} vol
+   * @param {import('../core/palette.js').Palette} [palette]
+   * @returns {'voxels'|'palette'|null} what was undone, so the caller knows
+   *   whether geometry or only the palette texture has to be refreshed
+   */
+  undo(vol, palette) {
+    if (!this.canUndo) return null;
+    const entry = this.stack[this.cursor - 1];
+    if (entry.kind === 'palette') {
+      // Without the palette there is nothing to write to; leave the cursor
+      // where it is rather than silently dropping the step.
+      if (!palette) return null;
+      this.cursor--;
+      applyColour(palette, entry.index, entry.before);
+      this.paletteDrag = null;
+      return 'palette';
+    }
+    this.cursor--;
+    for (const e of entry.map.values()) writeVoxel(vol, e.x, e.y, e.z, e.before);
+    this.paletteDrag = null;
+    return 'voxels';
   }
 
-  /** @param {import('../core/volume.js').Volume} vol @returns {boolean} */
-  redo(vol) {
-    if (!this.canRedo) return false;
-    const map = this.stack[this.cursor++];
-    for (const e of map.values()) writeVoxel(vol, e.x, e.y, e.z, e.after);
-    return true;
+  /**
+   * @param {import('../core/volume.js').Volume} vol
+   * @param {import('../core/palette.js').Palette} [palette]
+   * @returns {'voxels'|'palette'|null}
+   */
+  redo(vol, palette) {
+    if (!this.canRedo) return null;
+    const entry = this.stack[this.cursor];
+    if (entry.kind === 'palette') {
+      if (!palette) return null;
+      this.cursor++;
+      applyColour(palette, entry.index, entry.after);
+      this.paletteDrag = null;
+      return 'palette';
+    }
+    this.cursor++;
+    for (const e of entry.map.values()) writeVoxel(vol, e.x, e.y, e.z, e.after);
+    this.paletteDrag = null;
+    return 'voxels';
   }
 
   clear() {
     this.stack.length = 0;
     this.cursor = 0;
     this.pending = null;
+    this.paletteDrag = null;
   }
+}
+
+/**
+ * @param {import('../core/palette.js').Palette} palette
+ * @param {number} index @param {number} packed 0xRRGGBB
+ */
+function applyColour(palette, index, packed) {
+  palette.replace(index, (packed >> 16) & 255, (packed >> 8) & 255, packed & 255);
 }
 
 /** @param {Uint8Array} a @param {Uint8Array} b */

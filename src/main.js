@@ -656,22 +656,98 @@ function markActiveTool() {
   canvas.className = state.tool === 'orbit' ? '' : 'tool-' + state.tool;
 }
 
+/**
+ * Which swatch an event landed on, or 0.
+ *
+ * The strip is rebuilt whenever the selection changes, so its buttons are not
+ * the same nodes from one click to the next. Listening on the strip instead of
+ * on each button is what lets a double-click survive the rebuild the first
+ * click causes - and keeps one pair of listeners instead of 255.
+ * @param {Event} e
+ */
+function swatchSlot(e) {
+  const el = /** @type {HTMLElement|null} */ (e.target);
+  const slot = el && el.dataset ? el.dataset.slot : undefined;
+  return slot ? +slot : 0;
+}
+
 function refreshPalette() {
   const host = $('palette-strip');
   host.innerHTML = '';
   for (let i = 1; i < state.palette.size; i++) {
     const b = document.createElement('button');
     b.type = 'button';
+    b.dataset.slot = String(i);
     b.style.background = state.palette.hex(i);
-    b.title = state.palette.hex(i);
+    b.title = swatchTitle(i);
     b.classList.toggle('on', i === state.color);
-    b.addEventListener('click', () => {
-      state.color = i;
-      refreshPalette();
-    });
     host.appendChild(b);
   }
   if (state.color >= state.palette.size) state.color = Math.max(1, state.palette.size - 1);
+}
+
+/** @param {number} i */
+function swatchTitle(i) {
+  return state.palette.hex(i) + ' - ' + t('edit.recolour');
+}
+
+/**
+ * Repaint one swatch without rebuilding the strip.
+ *
+ * A picker drag fires an event per pointer move, and rebuilding 255 buttons
+ * each time is what would make an instant operation feel slow.
+ * @param {number} i
+ */
+function updateSwatch(i) {
+  const b = /** @type {HTMLElement|null} */ ($('palette-strip').querySelector('[data-slot="' + i + '"]'));
+  if (!b) return;
+  b.style.background = state.palette.hex(i);
+  b.title = swatchTitle(i);
+}
+
+/**
+ * The swatch whose colour the open picker is rewriting, and the colour it held
+ * when the drag began - the one Ctrl+Z has to restore.
+ */
+let recolourSlot = 0;
+let recolourBefore = 0;
+
+/** @param {number} i */
+function openRecolour(i) {
+  const input = /** @type {HTMLInputElement} */ ($('edit-color'));
+  state.history.endPalette();
+  recolourSlot = i;
+  recolourBefore = state.palette.colors[i] | 0;
+  input.value = state.palette.hex(i);
+  // showPicker() opens the picker without focusing a visible control; where it
+  // is missing, clicking the input does the same thing.
+  const anyInput = /** @type {any} */ (input);
+  if (typeof anyInput.showPicker === 'function') {
+    try {
+      anyInput.showPicker();
+      return;
+    } catch { /* fall through to click() */ }
+  }
+  input.click();
+}
+
+/**
+ * Live recolour. No voxel is read or written and no geometry is rebuilt: the
+ * face bytes already say "slot i", so the model is repainted by uploading the
+ * 256x1 palette texture, which costs the same at 512 as at 32.
+ */
+function applyRecolour() {
+  if (!recolourSlot) return;
+  const input = /** @type {HTMLInputElement} */ ($('edit-color'));
+  const n = parseInt(input.value.slice(1), 16);
+  if (!Number.isFinite(n)) return;
+  if (!state.palette.replace(recolourSlot, (n >> 16) & 255, (n >> 8) & 255, n & 255)) return;
+  state.history.pushPalette(recolourSlot, recolourBefore, state.palette.colors[recolourSlot] | 0);
+  renderer.setPalette(state.palette);
+  updateSwatch(recolourSlot);
+  state.dirty = true;
+  refreshHistoryButtons();
+  status('status.colorReplaced', { n: recolourSlot, hex: state.palette.hex(recolourSlot) });
 }
 
 function refreshHistoryButtons() {
@@ -763,22 +839,38 @@ function runToolAtPoint(sx, sy) {
 }
 
 function undo() {
-  if (!state.volume || !state.history.undo(state.volume)) {
+  const kind = state.volume ? state.history.undo(state.volume, state.palette) : null;
+  if (!kind) {
     status('status.nothingToUndo');
     return;
   }
-  state.geometryDirty = true;
-  state.dirty = true;
-  refreshHistoryButtons();
+  afterHistoryStep(kind);
   status('status.undone');
 }
 
 function redo() {
-  if (!state.volume || !state.history.redo(state.volume)) return;
-  state.geometryDirty = true;
+  const kind = state.volume ? state.history.redo(state.volume, state.palette) : null;
+  if (!kind) return;
+  afterHistoryStep(kind);
+  status('status.redone');
+}
+
+/**
+ * Refresh only what the undone step actually touched. A recoloured slot leaves
+ * every voxel and every face byte exactly where they were, so rebuilding the
+ * face buffer for it would cost the whole model's worth of work to show a
+ * 1 KB texture change.
+ * @param {'voxels'|'palette'} kind
+ */
+function afterHistoryStep(kind) {
+  if (kind === 'palette') {
+    renderer.setPalette(state.palette);
+    refreshPalette();
+  } else {
+    state.geometryDirty = true;
+  }
   state.dirty = true;
   refreshHistoryButtons();
-  status('status.redone');
 }
 
 /**
@@ -1377,6 +1469,9 @@ function retranslate() {
   buildAngleChips();
   buildToolBar();
   refreshSlots();
+  // The swatch tooltips are built by hand from a colour and a phrase, so
+  // data-i18n cannot reach them.
+  refreshPalette();
   refreshLanguageButton();
   // Carries numbers, so it is written by hand rather than by data-i18n and has
   // to be asked to rewrite itself.
@@ -1410,6 +1505,33 @@ function init() {
 
   $('btn-undo').addEventListener('click', undo);
   $('btn-redo').addEventListener('click', redo);
+
+  const strip = $('palette-strip');
+  strip.addEventListener('click', (e) => {
+    const i = swatchSlot(e);
+    if (!i || i === state.color) return;
+    state.color = i;
+    refreshPalette();
+  });
+  strip.addEventListener('dblclick', (e) => {
+    const i = swatchSlot(e);
+    if (i) openRecolour(i);
+  });
+
+  const editColor = /** @type {HTMLInputElement} */ ($('edit-color'));
+  editColor.addEventListener('input', applyRecolour);
+  // `change` ends the drag: everything between the first `input` and here is
+  // one undo step. `blur` is the belt and braces for a picker dismissed
+  // without committing, so the next edit can never join the previous step.
+  editColor.addEventListener('change', () => {
+    applyRecolour();
+    state.history.endPalette();
+    recolourSlot = 0;
+  });
+  editColor.addEventListener('blur', () => {
+    state.history.endPalette();
+    recolourSlot = 0;
+  });
 
   $('btn-add-color').addEventListener('click', () => {
     const hex = /** @type {HTMLInputElement} */ ($('new-color')).value;

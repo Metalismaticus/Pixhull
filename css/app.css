@@ -495,6 +495,20 @@ input[type="color"] {
   cursor: pointer;
 }
 
+/*
+ * The picker that recolours an existing swatch has no place of its own in the
+ * panel: it is opened from the swatch and closes itself. It stays in the
+ * layout rather than `display: none` because a hidden input cannot be asked
+ * to show its picker.
+ */
+.offscreen {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .history-row { gap: 4px; }
 .history-row button { flex: 1 1 0; }
 
