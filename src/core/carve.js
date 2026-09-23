@@ -19,6 +19,8 @@ import { Volume, DIRS, DIR_PX, DIR_NX, DIR_PY, DIR_NY, DIR_PZ, DIR_NZ } from './
 import { VIEW_GEOM, VIEW_NAMES } from './views.js';
 import { findLookalikeViews } from './diagnose.js';
 import { densityField, facingOf, FACE_DIRS } from './field.js';
+import { PALETTE_MAX } from './palette.js';
+import { quantize } from './quantize.js';
 
 /** Which view looks at the opposite side of the model. */
 const OPPOSITE = {
@@ -170,12 +172,14 @@ export function carve(views, N, palette, opts = {}) {
 }
 
 /**
- * Fill the palette in order of how much of the model each colour covers.
+ * Choose the palette from the histogram of all six views at once.
  *
- * Palette.add keeps the first entries it is given and resolves later ones to
- * the nearest already present, so handing it colours most-used first is the
- * whole mechanism: the real palette lands in the table and the anti-aliasing
- * fringes fall back onto it.
+ * Art that fits keeps every colour exactly, most used first - there is nothing
+ * to decide. Art that does not fit is quantised (`quantize.js`): the 255 slots
+ * are spread by how much colour error each one removes, instead of going to
+ * whatever covered the most cells. Ordering by coverage was the old rule, and
+ * it is how a white lorry came out grey all over - hundreds of anti-aliased
+ * near-whites each covered more cells than the tail lights.
  *
  * @param {Record<string, {mask: Uint8Array, rgb: Int32Array}>} sampled
  * @param {import('./palette.js').Palette} palette
@@ -190,10 +194,15 @@ function seedPalette(sampled, palette) {
       counts.set(rgb[i], (counts.get(rgb[i]) ?? 0) + 1);
     }
   }
-  const byUse = [...counts.entries()].sort((a, b) => b[1] - a[1]);
-  for (const [packed] of byUse) {
-    palette.add((packed >> 16) & 255, (packed >> 8) & 255, packed & 255);
+  if (counts.size <= PALETTE_MAX - 1) {
+    const byUse = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    for (const [packed] of byUse) {
+      palette.add((packed >> 16) & 255, (packed >> 8) & 255, packed & 255);
+    }
+    return;
   }
+  const { colors, assign } = quantize(counts, PALETTE_MAX - 1);
+  palette.adopt(colors, assign);
 }
 
 /**

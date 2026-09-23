@@ -241,3 +241,64 @@ export const SHAPES = {
     return (x, y, z) => x === at;
   },
 };
+
+/**
+ * A painted body: one flat base colour, a lot of near-identical shading, and
+ * small bright accents.
+ *
+ * This is the shape of the palette problem rather than a shape in space. Six
+ * full squares carve into a bare cube, so the geometry is trivial and every
+ * face is painted straight from a drawing - what is left to measure is the
+ * colour. The drawing is built so that the two ways of filling a palette
+ * disagree: every shading grey covers more cells than any one accent, so
+ * picking the 255 most used colours spends the slots on shades nobody can tell
+ * apart and throws the lights and badges away outright.
+ *
+ * The counts are chosen, not measured: 204 near-white shades and 216 accent
+ * colours against 255 slots, with accents on about a third of the area. They
+ * stand for a white lorry with painted detail, which is the art the defect was
+ * reported on.
+ *
+ * @param {number} N grid size; 64 is what the checks use
+ * @returns {Record<string, {width: number, height: number, data: Uint8ClampedArray}>}
+ */
+export function makeLivery(N) {
+  /** Hue families for the accents - far from the body and far from each other. */
+  const FAMILIES = [
+    [200, 40, 40], [40, 90, 200], [230, 180, 40],
+    [40, 170, 80], [180, 60, 180], [240, 120, 30],
+  ];
+  const PATCH = Math.max(2, Math.floor(N / 10));
+  const STEP = PATCH * 2;
+  const PER_ROW = Math.ceil(N / STEP);
+  /** @type {Record<string, any>} */
+  const images = {};
+
+  VIEW_NAMES.forEach((name, view) => {
+    const img = makeImage(N, N);
+    for (let v = 0; v < N; v++) {
+      for (let u = 0; u < N; u++) {
+        // Shading: 34 shades per view, a 4x4 block of cells at a time, and no
+        // two views share one - the anti-aliased near-whites of real art.
+        const block = ((v / 4) | 0) * 19 + ((u / 4) | 0) * 7;
+        const shade = view * 34 + (block % 34);
+        /** @type {number[]} */
+        const rgb = [246 - (shade % 17), 248 - (((shade / 17) | 0) % 12), 250];
+
+        // Accents: small patches, each its own colour, each covering fewer
+        // cells than any single shade does.
+        if (u % STEP < PATCH && v % STEP < PATCH) {
+          const slot = view * PER_ROW * PER_ROW + ((v / STEP) | 0) * PER_ROW + ((u / STEP) | 0);
+          const base = FAMILIES[slot % FAMILIES.length];
+          const tint = ((slot / FAMILIES.length) | 0) % 20;
+          rgb[0] = base[0] - tint;
+          rgb[1] = base[1] + tint;
+          rgb[2] = base[2] - ((slot % 3) * 4);
+        }
+        setPixel(img, u, v, rgb);
+      }
+    }
+    images[name] = img;
+  });
+  return images;
+}

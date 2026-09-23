@@ -7,6 +7,8 @@
  * Index 0 is reserved and means "no colour assigned".
  */
 
+import { packedToLab, ciede2000 } from './color.js';
+
 export const PALETTE_MAX = 256;
 
 export class Palette {
@@ -17,6 +19,10 @@ export class Palette {
     this.lookup = new Map();
     /** true once art brought in more than 255 distinct colours */
     this.overflowed = false;
+    /** @type {Float64Array|null} Lab cache for `nearest`, rebuilt on change */
+    this._labs = null;
+    /** @type {number} palette length the Lab cache was built for */
+    this._labsFor = -1;
   }
 
   get size() {
@@ -53,27 +59,76 @@ export class Palette {
   }
 
   /**
-   * Closest palette entry by redmean distance - cheap, and noticeably better
-   * than plain RGB euclidean on the saturated colours pixel art tends to use.
+   * Closest palette entry by CIEDE2000.
+   *
+   * This used to be redmean, a weighted RGB distance. Redmean is cheaper but
+   * not perceptual, and it is the reason a red cab could resolve to a grey:
+   * in RGB a saturated colour sits no further from a light neutral than two
+   * neighbouring neutrals sit from each other. See `color.js`.
+   *
    * @param {number} r @param {number} g @param {number} b
    * @returns {number} index in 1..255 (0 only when the palette is empty)
    */
   nearest(r, g, b) {
+    const lab = this.labs();
+    const [L, A, B] = packedToLab(((r & 255) << 16) | ((g & 255) << 8) | (b & 255));
     let best = 0;
     let bestD = Infinity;
     for (let i = 1; i < this.colors.length; i++) {
-      const c = this.colors[i];
-      const dr = ((c >> 16) & 255) - r;
-      const dg = ((c >> 8) & 255) - g;
-      const db = (c & 255) - b;
-      const rm = (((c >> 16) & 255) + r) * 0.5;
-      const d = (2 + rm / 256) * dr * dr + 4 * dg * dg + (2 + (255 - rm) / 256) * db * db;
+      const o = i * 3;
+      const d = ciede2000(L, A, B, lab[o], lab[o + 1], lab[o + 2]);
       if (d < bestD) {
         bestD = d;
         best = i;
       }
     }
     return best;
+  }
+
+  /**
+   * Lab for every entry, built once and kept until the colours change. Without
+   * it a sprite sheet would reconvert all 255 entries for every pixel.
+   *
+   * The cache notices a palette that grew. Anything that ever changes a colour
+   * *in place* has to clear `_labs` itself.
+   * @returns {Float64Array}
+   */
+  labs() {
+    if (this._labs && this._labsFor === this.colors.length) return this._labs;
+    const out = new Float64Array(this.colors.length * 3);
+    for (let i = 1; i < this.colors.length; i++) {
+      const [L, A, B] = packedToLab(this.colors[i]);
+      out[i * 3] = L;
+      out[i * 3 + 1] = A;
+      out[i * 3 + 2] = B;
+    }
+    this._labs = out;
+    this._labsFor = this.colors.length;
+    return out;
+  }
+
+  /**
+   * Install a chosen set of colours together with the mapping that put them
+   * there, for art that brought in more than 255 distinct colours.
+   *
+   * The mapping is the point: every colour the art actually contains is
+   * already resolved, so the import never pays a nearest-colour search, and it
+   * resolves to the entry the quantiser grouped it with rather than to whatever
+   * happened to be interned first.
+   *
+   * @param {number[]} colors packed 0xRRGGBB, at most PALETTE_MAX - 1 of them
+   * @param {Map<number, number>} assign source colour -> index into `colors`
+   */
+  adopt(colors, assign) {
+    if (this.colors.length !== 1) throw new Error('adopt() needs an empty palette');
+    this.colors = [0x000000, ...colors.slice(0, PALETTE_MAX - 1)];
+    this.lookup = new Map();
+    for (let i = 1; i < this.colors.length; i++) this.lookup.set(this.colors[i], i);
+    for (const [key, slot] of assign) {
+      if (slot + 1 < this.colors.length) this.lookup.set(key, slot + 1);
+    }
+    this.overflowed = true;
+    this._labs = null;
   }
 
   /**
