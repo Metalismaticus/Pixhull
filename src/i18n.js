@@ -82,6 +82,7 @@ const STRINGS = {
 
     'model.heading': 'Model',
     'model.obj': 'Export OBJ + MTL',
+    'model.vox': 'Export .vox (MagicaVoxel)',
     'model.save': 'Save project',
     'model.load': 'Load project',
 
@@ -104,6 +105,7 @@ const STRINGS = {
     'status.exportedSheet': 'Exported {n} frames at {w}×{h} px',
     'status.exportedFrames': 'Exported {n} frames + metadata',
     'status.exportedObj': 'OBJ: {quads} quads ({saved}% merged), {verts} verts',
+    'status.exportedVox': '.vox: {n} voxels, {c} colours, {w}×{h}×{d}',
     'status.projectSaved': 'Project saved',
     'status.projectLoaded': 'Project loaded',
     'status.projectFailed': 'Could not load project: {err}',
@@ -204,6 +206,7 @@ const STRINGS = {
 
     'model.heading': 'Модель',
     'model.obj': 'Экспорт OBJ + MTL',
+    'model.vox': 'Экспорт .vox (MagicaVoxel)',
     'model.save': 'Сохранить проект',
     'model.load': 'Загрузить проект',
 
@@ -226,6 +229,7 @@ const STRINGS = {
     'status.exportedSheet': 'Экспортировано {n} кадров по {w}×{h} пкс',
     'status.exportedFrames': 'Экспортировано {n} кадров + метаданные',
     'status.exportedObj': 'OBJ: {quads} квадов ({saved}% склеено), {verts} вершин',
+    'status.exportedVox': '.vox: {n} вокселей, цветов {c}, {w}×{h}×{d}',
     'status.projectSaved': 'Проект сохранён',
     'status.projectLoaded': 'Проект загружен',
     'status.projectFailed': 'Не удалось загрузить проект: {err}',

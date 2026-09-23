@@ -10,6 +10,7 @@ import { Renderer } from './gfx/renderer.js';
 import { OrthoCamera, PITCH_PRESETS, directionYaws, DEG } from './gfx/camera.js';
 import { renderTurnaround, packSheet, snapToPalette, imageDataToPng, downloadBlob } from './export/sprite.js';
 import { exportObj } from './export/obj.js';
+import { exportVox } from './export/vox.js';
 import { makeZip, blobBytes } from './export/zip.js';
 import { buildDemoViews } from './demo.js';
 import { t, num, getLang, setLang, applyTranslations } from './i18n.js';
@@ -733,6 +734,22 @@ async function exportFrames() {
   }
 }
 
+async function doExportVox() {
+  if (!state.volume) return;
+  status('status.meshing');
+  await nextFrame();
+  try {
+    const { bytes, stats } = exportVox(state.volume, state.palette);
+    downloadBlob(new Blob([bytes], { type: 'application/octet-stream' }), 'pixhull.vox');
+    status('status.exportedVox', {
+      n: stats.voxels, c: stats.colors,
+      w: stats.size[0], h: stats.size[1], d: stats.size[2],
+    });
+  } catch (err) {
+    status('status.badImage', { err: String(err instanceof Error ? err.message : err) }, 'error');
+  }
+}
+
 async function doExportObj() {
   if (!state.volume) return;
   status('status.meshing');
@@ -1000,6 +1017,7 @@ function init() {
   $('btn-export-sheet').addEventListener('click', exportSheet);
   $('btn-export-frames').addEventListener('click', exportFrames);
   $('btn-export-obj').addEventListener('click', doExportObj);
+  $('btn-export-vox').addEventListener('click', doExportVox);
   $('btn-save').addEventListener('click', saveProject);
   $('btn-load').addEventListener('click', () => /** @type {HTMLInputElement} */ ($('project-input')).click());
 

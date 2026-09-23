@@ -80,20 +80,20 @@ h1, h2 { margin: 0; font-weight: 600; }
   border-bottom: 1px solid var(--line);
 }
 
-.brand { display: flex; align-items: baseline; gap: 10px; }
+.brand { display: flex; align-items: center; gap: 10px; }
 .brand h1 { font-size: 15px; letter-spacing: 0.01em; }
 
 .logo {
-  width: 14px; height: 14px;
+  width: 18px; height: 18px;
   align-self: center;
-  background: linear-gradient(135deg, var(--accent) 50%, var(--accent-dim) 50%);
-  border-radius: 2px;
+  background: url("../assets/icon-32.png") center / contain no-repeat;
+  border-radius: 4px;
 }
 
 .tagline { color: var(--text-dim); font-size: 12px; }
 @media (max-width: 900px) { .tagline { display: none; } }
 
-.topbar-actions { display: flex; gap: 6px; }
+.topbar-actions { display: flex; align-items: center; gap: 6px; }
 
 /* ---------------------------------------------------------------- layout */
 
@@ -267,12 +267,24 @@ button.primary {
 button.primary:hover { filter: brightness(1.12); }
 button.primary:disabled { background: var(--accent-dim); border-color: var(--accent-dim); opacity: .7; cursor: not-allowed; }
 
+/* The Source link has to match the buttons beside it exactly: same box, same
+   height, same optical centre. Left as an inline-block <a> it inherited none of
+   the button padding and sat on its own baseline. */
 button.ghost, .ghost.link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
   background: transparent;
-  border-color: var(--line);
   color: var(--text-dim);
   text-decoration: none;
-  display: inline-block;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
 }
 button.ghost:hover, .ghost.link:hover { color: var(--text); border-color: var(--accent-dim); }
 button.ghost:disabled { opacity: .45; cursor: not-allowed; }

@@ -104,6 +104,15 @@ Projects save the voxels, not just the source views - re-carving from the same
 PNGs could never reproduce something carved by hand. Two run-length streams get
 the demo from 94 KiB raw to 5.8 KiB, and the round-trip is bit-exact.
 
+### Exporting to a one-colour-per-voxel world
+
+`.vox` gives a voxel a single colour, and Pixhull gives it six. The export
+resolves that with a vote among the faces you can actually see: a tyre whose
+visible faces are all black stays black, and buried faces get no say, because
+letting hidden geometry decide how a model looks is how exports end up muddy.
+The 256-entry palette matches Pixhull's exactly, so colours make the trip with
+no requantisation.
+
 ### Any image size
 
 Views do not have to be square, do not have to match each other, and do not
@@ -140,6 +149,7 @@ Pages serves; there is nothing to build, so the repository root is the site.
 | [`src/gfx/renderer.js`](src/gfx/renderer.js) | Instanced face renderer — one draw call for the whole model |
 | [`src/export/sprite.js`](src/export/sprite.js) | Turnaround rendering, sheet packing, palette snapping |
 | [`src/export/obj.js`](src/export/obj.js) | OBJ + MTL with greedy face merging (~90% fewer quads on the demo) |
+| [`src/export/vox.js`](src/export/vox.js) | MagicaVoxel `.vox`, resolving six face colours to the one a voxel gets |
 | [`src/edit/pick.js`](src/edit/pick.js) | Screen ray and grid walk — a click to a voxel and a face |
 | [`src/edit/tools.js`](src/edit/tools.js) | Paint, fill, erase, add, symmetry, and face healing |
 | [`src/edit/history.js`](src/edit/history.js) | Undo/redo, one step per stroke, storing only touched voxels |
@@ -163,10 +173,12 @@ the editor exists rather than being optional.
 - [ ] Rebuild only the chunks an edit dirtied, instead of the whole instance buffer
 - [ ] Per-view depth map input, to recover concavities the hull cannot
 - [ ] Animation: parts with pivots, wheel spin, sprite sheets per animation
-- [ ] `.vox` and PNG slice export (sprite stacking)
+- [x] `.vox` export (MagicaVoxel)
+- [ ] PNG slice export (sprite stacking)
 - [ ] glTF export
 - [ ] Engine metadata presets (Godot, Unity, GameMaker, RPG Maker)
 - [ ] Desktop build via Tauri
+- [ ] An MCP server over the same core, so an assistant can hand it views and get a model back
 
 ## Licence
 
