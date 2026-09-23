@@ -18,6 +18,7 @@
 import { Volume, DIRS } from './volume.js';
 import { VIEW_GEOM, VIEW_NAMES } from './views.js';
 import { findLookalikeViews } from './diagnose.js';
+import { densityField, facingOf, FACE_DIRS } from './field.js';
 
 /** Which view looks at the opposite side of the model. */
 const OPPOSITE = {
@@ -145,6 +146,7 @@ export function carve(views, N, palette, opts = {}) {
   }
 
   const { painted, dominant } = paintFromViews(vol, raster, N);
+  if (opts.slopeColour !== false) repaintSlopes(vol, raster, N);
   const inferred = inferMissingFaces(vol, dominant);
 
   return {
@@ -207,6 +209,80 @@ function mirrorRaster(src, N, axis) {
     }
   }
   return { mask, color };
+}
+
+/**
+ * Repaint the faces of a sloped surface from the one drawing that faces it.
+ *
+ * A windscreen that slopes back is a staircase once it is on a grid, and its
+ * treads and risers point in different directions - so the treads are painted
+ * by the top view and the risers by the head-on view. That is right only if
+ * the two drawings agree about where the glass starts, and they never quite
+ * do: the artist drew the windscreen beginning at one place seen from the
+ * front and another seen from above. The staircase then alternates between
+ * them, one row red and the next white, one row blue and the next red, which
+ * is exactly the banding on the cab.
+ *
+ * The surface itself is not stepped, though; only its lattice is. Reading the
+ * direction it really faces off a blurred copy of the model gives the treads
+ * and the risers the same answer, and once they take their colour from the
+ * same drawing the banding has nothing to alternate between. Where a face
+ * genuinely points along its own axis - the side of the box body, the roof -
+ * that drawing is its own, and nothing changes.
+ *
+ * @param {Volume} vol
+ * @param {Record<string, {mask: Uint8Array, color: Uint8Array}>} raster
+ * @param {number} N
+ */
+function repaintSlopes(vol, raster, N) {
+  const box = vol.bounds();
+  if (!box) return;
+  const field = densityField(vol, box, 2);
+  /** face index -> the view that stares down it */
+  const facing = {};
+  for (const name of Object.keys(raster)) facing[VIEW_GEOM[name].face] = name;
+
+  // Occupancy read into a flat array first. Finding the exposed faces asks
+  // about seven voxels each, and on a three-million-voxel model going through
+  // the chunked store that many times costs more than the rest of the pass.
+  const bx = box.max[0] - box.min[0] + 3;
+  const by = box.max[1] - box.min[1] + 3;
+  const bz = box.max[2] - box.min[2] + 3;
+  const solid = new Uint8Array(bx * by * bz);
+  const at = (x, y, z) =>
+    ((z - box.min[2] + 1) * by + (y - box.min[1] + 1)) * bx + (x - box.min[0] + 1);
+  for (let z = box.min[2] - 1; z <= box.max[2] + 1; z++) {
+    for (let y = box.min[1] - 1; y <= box.max[1] + 1; y++) {
+      for (let x = box.min[0] - 1; x <= box.max[0] + 1; x++) {
+        if (vol.get(x, y, z)) solid[at(x, y, z)] = 1;
+      }
+    }
+  }
+
+  for (let z = box.min[2]; z <= box.max[2]; z++) {
+    for (let y = box.min[1]; y <= box.max[1]; y++) {
+      for (let x = box.min[0]; x <= box.max[0]; x++) {
+        if (!solid[at(x, y, z)]) continue;
+        let want = -1;
+        for (let d = 0; d < 6; d++) {
+          const [ox, oy, oz] = FACE_DIRS[d];
+          if (solid[at(x + ox, y + oy, z + oz)]) continue;
+          // Only worth the lookup once we know some face here is exposed.
+          if (want === -1) {
+            want = facingOf(field, x, y, z);
+            if (want < 0) break;
+          }
+          if (d === want) continue;
+          const name = facing[want];
+          if (!name) continue;
+          const [u, v] = VIEW_GEOM[name].uv(x, y, z, N);
+          const o = v * N + u;
+          if (!raster[name].mask[o]) continue;
+          vol.setFace(x, y, z, d, raster[name].color[o]);
+        }
+      }
+    }
+  }
 }
 
 /**

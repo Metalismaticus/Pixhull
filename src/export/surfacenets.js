@@ -32,6 +32,8 @@
  * detail but never loses a colour.
  */
 
+import { densityField } from '../core/field.js';
+
 /**
  * @typedef {Object} SmoothMesh
  * @property {number[]} verts flat x, y, z triples in voxel units
@@ -45,79 +47,6 @@ const CUBE_EDGES = [
   [0, 2], [1, 3], [4, 6], [5, 7],
   [0, 4], [1, 5], [2, 6], [3, 7],
 ];
-
-/**
- * Occupancy blurred into a density field over the model's bounding box.
- *
- * A binary lattice has only six normals, and a surface built from them is
- * blocky by construction - which is why the first attempt at rounding had to
- * drag every vertex towards its neighbours and rounded the corners of the box
- * body as eagerly as the slope of a windscreen. Blurring first gives the
- * surface a *gradient*: across a staircase the density falls off along the
- * slope, so the normals there all point the same way, while at a real corner
- * they stay in two distinct groups. That difference is what lets the vertex
- * solver below tell a corner from a staircase.
- *
- * Three separable passes with a running sum, so cost does not grow with the
- * radius.
- *
- * @param {import('../core/volume.js').Volume} vol
- * @param {{min: number[], max: number[]}} box
- * @param {number} radius
- */
-function densityField(vol, box, radius) {
-  const pad = radius + 2;
-  const ox = box.min[0] - pad;
-  const oy = box.min[1] - pad;
-  const oz = box.min[2] - pad;
-  const nx = box.max[0] - box.min[0] + 1 + 2 * pad;
-  const ny = box.max[1] - box.min[1] + 1 + 2 * pad;
-  const nz = box.max[2] - box.min[2] + 1 + 2 * pad;
-  const data = new Float32Array(nx * ny * nz);
-  const at = (i, j, k) => (k * ny + j) * nx + i;
-
-  for (let k = 0; k < nz; k++) {
-    for (let j = 0; j < ny; j++) {
-      for (let i = 0; i < nx; i++) {
-        if (vol.get(ox + i, oy + j, oz + k)) data[at(i, j, k)] = 1;
-      }
-    }
-  }
-
-  const width = 2 * radius + 1;
-  const line = new Float32Array(Math.max(nx, ny, nz));
-  /** One separable pass: `count` samples `step` apart starting at `base`. */
-  const blur = (base, step, count) => {
-    for (let i = 0; i < count; i++) line[i] = data[base + i * step];
-    let sum = 0;
-    for (let i = 0; i <= radius && i < count; i++) sum += line[i];
-    for (let i = 0; i < count; i++) {
-      data[base + i * step] = sum / width;
-      const drop = i - radius;
-      const add = i + radius + 1;
-      if (drop >= 0) sum -= line[drop];
-      if (add < count) sum += line[add];
-    }
-  };
-  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) blur(at(0, j, k), 1, nx);
-  for (let k = 0; k < nz; k++) for (let i = 0; i < nx; i++) blur(at(i, 0, k), nx, ny);
-  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) blur(at(i, j, 0), nx * ny, nz);
-
-  return {
-    /** Gradient at a voxel centre, in voxel-index space. */
-    grad(x, y, z) {
-      const i = x - ox;
-      const j = y - oy;
-      const k = z - oz;
-      if (i < 1 || j < 1 || k < 1 || i >= nx - 1 || j >= ny - 1 || k >= nz - 1) return null;
-      return [
-        data[at(i + 1, j, k)] - data[at(i - 1, j, k)],
-        data[at(i, j + 1, k)] - data[at(i, j - 1, k)],
-        data[at(i, j, k + 1)] - data[at(i, j, k - 1)],
-      ];
-    },
-  };
-}
 
 /**
  * Where to put a cell's vertex, given the crossings and the surface normals

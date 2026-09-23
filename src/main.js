@@ -1326,6 +1326,14 @@ function init() {
   const relaxRange = /** @type {HTMLInputElement} */ ($('obj-relax'));
   smoothToggle.addEventListener('change', () => {
     relaxRange.disabled = !smoothToggle.checked;
+    // Switching the smooth mesh on with the slider at zero shows a shell that
+    // is still every bit a staircase, which reads as the rounding not working
+    // rather than as not having been asked for yet. Start it somewhere it can
+    // be seen; dragging it back to zero still gives the unrounded shell.
+    if (smoothToggle.checked && relaxRange.value === '0') {
+      relaxRange.value = '3';
+      $('relax-label').textContent = relaxRange.value;
+    }
     state.geometryDirty = true;
   });
   relaxRange.addEventListener('input', () => {
