@@ -113,6 +113,22 @@ letting hidden geometry decide how a model looks is how exports end up muddy.
 The 256-entry palette matches Pixhull's exactly, so colours make the trip with
 no requantisation.
 
+### Smooth meshes, not only cubes
+
+The carve is a lattice and always will be - that is what shape-from-silhouette
+on a grid produces, and the grid size is what sets how much detail exists. But
+the exported *mesh* does not have to be cubes. Tick "smooth mesh" and the OBJ is
+built with surface nets instead: one vertex per cell the surface crosses, placed
+at the average of the edge crossings, which turns a staircase into a rounded
+low-poly shell. A rounding slider adds Laplacian passes on top.
+
+Colour is free in this conversion - the quad for an edge between a solid and an
+empty voxel *is* a face Pixhull already painted - so smoothing costs geometry
+detail and never costs a colour. The demo comes out as a closed manifold: 1,084
+quads, 1,086 vertices, every edge used exactly twice. It is higher-poly than the
+greedy-merged blocky export (98 quads), because surface nets does not merge
+coplanar faces.
+
 ### Any image size
 
 Views do not have to be square, do not have to match each other, and do not
@@ -130,6 +146,15 @@ node tools/serve.mjs
 ```
 
 Then open <http://localhost:5173>. No `npm install` — there are no dependencies.
+
+To check every module still parses:
+
+```bash
+node tools/check.mjs
+```
+
+This imports each one rather than running `node --check`, which once accepted a
+string literal broken across two lines that the browser rejected outright.
 
 ## Deploy
 
@@ -150,6 +175,7 @@ Pages serves; there is nothing to build, so the repository root is the site.
 | [`src/export/sprite.js`](src/export/sprite.js) | Turnaround rendering, sheet packing, palette snapping |
 | [`src/export/obj.js`](src/export/obj.js) | OBJ + MTL with greedy face merging (~90% fewer quads on the demo) |
 | [`src/export/vox.js`](src/export/vox.js) | MagicaVoxel `.vox`, resolving six face colours to the one a voxel gets |
+| [`src/export/surfacenets.js`](src/export/surfacenets.js) | Smooth mesh over the same volume, with per-face colours preserved |
 | [`src/edit/pick.js`](src/edit/pick.js) | Screen ray and grid walk — a click to a voxel and a face |
 | [`src/edit/tools.js`](src/edit/tools.js) | Paint, fill, erase, add, symmetry, and face healing |
 | [`src/edit/history.js`](src/edit/history.js) | Undo/redo, one step per stroke, storing only touched voxels |
@@ -169,18 +195,20 @@ the editor exists rather than being optional.
 
 - [x] Voxel painting, filling, adding and erasing in the 3D view, with undo/redo
 - [x] Mirror editing across X
+- [x] `.vox` export (MagicaVoxel)
+- [x] Smooth mesh export (surface nets)
+- [ ] A box/region tool, for reshaping a model faster than one voxel at a time
 - [ ] Selections, layers and separate parts
-- [ ] Rebuild only the chunks an edit dirtied, instead of the whole instance buffer
+- [ ] A local MCP server, so an assistant can drive the pipeline over files on disk
+- [ ] A CPU rasteriser, so that server can hand back a preview the assistant can look at
+- [ ] glTF/GLB export, for engines that prefer it to OBJ
+- [ ] PNG slice export (sprite stacking)
 - [ ] Per-view depth map input, to recover concavities the hull cannot
 - [ ] Animation: parts with pivots, wheel spin, sprite sheets per animation
-- [x] `.vox` export (MagicaVoxel)
-- [ ] PNG slice export (sprite stacking)
-- [ ] glTF export
 - [ ] Engine metadata presets (Godot, Unity, GameMaker, RPG Maker)
-- [ ] Desktop build via Tauri
-- [ ] An MCP server over the same core, so an assistant can hand it views and get a model back
-- [ ] A box/region tool, for reshaping a model faster than one voxel at a time
+- [ ] Rebuild only the chunks an edit dirtied, instead of the whole instance buffer
 - [ ] An import map, so a deploy can never serve a new page against cached older modules
+- [ ] Desktop build via Tauri
 
 ## Licence
 

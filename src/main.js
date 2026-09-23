@@ -755,7 +755,9 @@ async function doExportObj() {
   status('status.meshing');
   await nextFrame();
   try {
-    const { obj, mtl, stats } = exportObj(state.volume, state.palette, { name: 'pixhull' });
+    const smooth = /** @type {HTMLInputElement} */ ($('obj-smooth')).checked;
+    const relax = +(/** @type {HTMLInputElement} */ ($('obj-relax')).value);
+    const { obj, mtl, stats } = exportObj(state.volume, state.palette, { name: 'pixhull', smooth, relax });
     const enc = new TextEncoder();
     downloadBlob(
       makeZip([
@@ -764,8 +766,12 @@ async function doExportObj() {
       ]),
       'pixhull-model.zip'
     );
-    const saved = stats.rawQuads > 0 ? Math.round((1 - stats.quads / stats.rawQuads) * 100) : 0;
-    status('status.exportedObj', { quads: stats.quads, saved, verts: stats.vertices });
+    if (stats.smooth) {
+      status('status.exportedObjSmooth', { quads: stats.quads, verts: stats.vertices });
+    } else {
+      const saved = stats.rawQuads > 0 ? Math.round((1 - stats.quads / stats.rawQuads) * 100) : 0;
+      status('status.exportedObj', { quads: stats.quads, saved, verts: stats.vertices });
+    }
   } catch (err) {
     status('status.badImage', { err: String(err instanceof Error ? err.message : err) }, 'error');
   }
@@ -1018,6 +1024,11 @@ function init() {
   $('btn-export-frames').addEventListener('click', exportFrames);
   $('btn-export-obj').addEventListener('click', doExportObj);
   $('btn-export-vox').addEventListener('click', doExportVox);
+
+  const smoothToggle = /** @type {HTMLInputElement} */ ($('obj-smooth'));
+  const relaxRange = /** @type {HTMLInputElement} */ ($('obj-relax'));
+  smoothToggle.addEventListener('change', () => { relaxRange.disabled = !smoothToggle.checked; });
+  relaxRange.addEventListener('input', () => { $('relax-label').textContent = relaxRange.value; });
   $('btn-save').addEventListener('click', saveProject);
   $('btn-load').addEventListener('click', () => /** @type {HTMLInputElement} */ ($('project-input')).click());
 

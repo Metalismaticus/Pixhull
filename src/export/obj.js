@@ -14,6 +14,7 @@
  */
 
 import { DIRS } from '../core/volume.js';
+import { buildSmoothMesh } from './surfacenets.js';
 
 /**
  * axis: normal axis index; t1/t2: the two in-plane axis indices, ordered so
@@ -30,12 +31,57 @@ const PLANES = [
 ];
 
 /**
+ * @typedef {Object} ObjStats
+ * @property {number} quads faces written
+ * @property {number} rawQuads faces before merging (equal to quads when smooth)
+ * @property {number} vertices
+ * @property {boolean} smooth
+ */
+
+/**
  * @param {import('../core/volume.js').Volume} volume
  * @param {import('../core/palette.js').Palette} palette
- * @param {{name?: string, center?: boolean, scale?: number}} [opts]
- * @returns {{obj: string, mtl: string, stats: {quads: number, rawQuads: number, vertices: number}}}
+ * @param {{name?: string, center?: boolean, scale?: number, smooth?: boolean, relax?: number}} [opts]
+ * @returns {{obj: string, mtl: string, stats: ObjStats}}
  */
 export function exportObj(volume, palette, opts = {}) {
+  return opts.smooth ? exportSmooth(volume, palette, opts) : exportBlocky(volume, palette, opts);
+}
+
+/**
+ * The carve is a lattice and always will be, but the exported mesh does not
+ * have to be cubes. Surface nets give a rounded low-poly shell over the same
+ * voxels, carrying the same per-face colours.
+ */
+function exportSmooth(volume, palette, opts) {
+  const name = opts.name ?? 'pixhull';
+  const scale = opts.scale ?? 1;
+  const { verts, byMaterial, quads } = buildSmoothMesh(volume, { relax: opts.relax });
+
+  const origin = [0, 0, 0];
+  if (opts.center !== false) {
+    const b = volume.bounds();
+    if (b) {
+      origin[0] = (b.min[0] + b.max[0] + 1) / 2;
+      origin[1] = b.min[1];
+      origin[2] = (b.min[2] + b.max[2] + 1) / 2;
+    }
+  }
+  const placed = verts.map((v, i) => (v - origin[i % 3]) * scale);
+
+  return {
+    ...writeObj(placed, byMaterial, palette, name),
+    stats: { quads, rawQuads: quads, vertices: placed.length / 3, smooth: true },
+  };
+}
+
+/**
+ * @param {import('../core/volume.js').Volume} volume
+ * @param {import('../core/palette.js').Palette} palette
+ * @param {{name?: string, center?: boolean, scale?: number}} opts
+ * @returns {{obj: string, mtl: string, stats: ObjStats}}
+ */
+function exportBlocky(volume, palette, opts = {}) {
   const name = opts.name ?? 'pixhull';
   const scale = opts.scale ?? 1;
   const dims = [volume.nx, volume.ny, volume.nz];
@@ -139,13 +185,30 @@ export function exportObj(volume, palette, opts = {}) {
     }
   }
 
+  return {
+    ...writeObj(verts, byMaterial, palette, name),
+    stats: { quads, rawQuads, vertices: verts.length / 3, smooth: false },
+  };
+}
+
+/**
+ * Shared OBJ + MTL text assembly. Both meshers produce the same thing - a flat
+ * vertex list plus quads grouped by palette index - so only the geometry
+ * differs between blocky and smooth output.
+ * @param {number[]} verts already placed and scaled
+ * @param {Map<number, number[][]>} byMaterial
+ * @param {import('../core/palette.js').Palette} palette
+ * @param {string} name
+ * @returns {{obj: string, mtl: string}}
+ */
+function writeObj(verts, byMaterial, palette, name) {
   const obj = [];
   obj.push('# ' + name + ' - exported by Pixhull');
   obj.push('# 1 unit = 1 voxel');
   obj.push('mtllib ' + name + '.mtl');
   obj.push('o ' + name);
   for (let i = 0; i < verts.length; i += 3) {
-    obj.push('v ' + verts[i] + ' ' + verts[i + 1] + ' ' + verts[i + 2]);
+    obj.push('v ' + f(verts[i]) + ' ' + f(verts[i + 1]) + ' ' + f(verts[i + 2]));
   }
   for (const [c, list] of [...byMaterial].sort((a, b) => a[0] - b[0])) {
     obj.push('usemtl ' + materialName(c));
@@ -165,12 +228,11 @@ export function exportObj(volume, palette, opts = {}) {
     mtl.push('illum 1');
   }
 
-  return {
-    obj: obj.join('\n') + '\n',
-    mtl: mtl.join('\n') + '\n',
-    stats: { quads, rawQuads, vertices: verts.length / 3 },
-  };
+  return { obj: obj.join(NL) + NL, mtl: mtl.join(NL) + NL };
 }
+
+/** Newline, kept as a constant so no editing pass can turn it into a real one. */
+const NL = String.fromCharCode(10);
 
 /** @param {number} i */
 function materialName(i) {

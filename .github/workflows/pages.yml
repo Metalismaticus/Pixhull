@@ -34,12 +34,11 @@ jobs:
           # verify the fast-forward.
           fetch-depth: 0
 
+      # node --check is not enough: it once accepted a string literal broken
+      # across two lines that the browser rejected, and the app shipped dead.
+      # tools/check.mjs imports each module, which is the real test.
       - name: Check every module parses
-        run: |
-          shopt -s globstar
-          for f in src/**/*.js tools/*.mjs; do
-            node --check "$f"
-          done
+        run: node tools/check.mjs
 
       - name: Mirror main to gh-pages
         run: git push origin HEAD:gh-pages

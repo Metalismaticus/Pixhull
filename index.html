@@ -178,6 +178,16 @@
     <button id="btn-export-frames" class="ghost" type="button" data-i18n="export.frames"></button>
 
     <h2 data-i18n="model.heading"></h2>
+    <div class="field checkbox">
+      <input type="checkbox" id="obj-smooth">
+      <label for="obj-smooth" data-i18n="model.smooth"></label>
+    </div>
+    <div class="field">
+      <label for="obj-relax" data-i18n="model.relax"></label>
+      <input type="range" id="obj-relax" min="0" max="6" step="1" value="0" disabled>
+      <span class="unit" id="relax-label">0</span>
+    </div>
+    <p class="hint" data-i18n="model.smoothHint"></p>
     <button id="btn-export-obj" class="ghost" type="button" data-i18n="model.obj"></button>
     <button id="btn-export-vox" class="ghost" type="button" data-i18n="model.vox"></button>
     <button id="btn-save" class="ghost" type="button" data-i18n="model.save"></button>
