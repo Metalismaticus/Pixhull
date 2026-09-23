@@ -7,6 +7,7 @@ import { Palette } from './core/palette.js';
 import { SourceView, VIEW_NAMES, suggestGridSize } from './core/views.js';
 import { decodeImage } from './ui/decode.js';
 import { carve } from './core/carve.js';
+import { detectCells, cropCell, guessViews } from './core/sheet.js';
 import { Renderer } from './gfx/renderer.js';
 import { OrthoCamera, PITCH_PRESETS, directionYaws, DEG } from './gfx/camera.js';
 import { renderTurnaround, packSheet, snapToPalette, imageDataToPng, downloadBlob } from './export/sprite.js';
@@ -411,6 +412,111 @@ function zoomBy(delta) {
   camera.pixelsPerVoxel = Math.max(1, Math.min(64, camera.pixelsPerVoxel + delta));
   updateZoomLabel();
   state.dirty = true;
+}
+
+// ---------------------------------------------------------- sheet slicing
+
+/**
+ * The sheet currently open in the dialog, and the drawings found on it.
+ * @type {{image: {width: number, height: number, data: Uint8ClampedArray}, cells: import('./core/sheet.js').Cell[]} | null}
+ */
+let sheet = null;
+
+/** @param {Blob} file */
+async function openSheet(file) {
+  try {
+    sheet = { image: await decodeImage(file), cells: [] };
+    refreshSheetCells();
+    /** @type {HTMLDialogElement} */ ($('sheet-dialog')).showModal();
+  } catch (err) {
+    status('status.badImage', { err: String(err instanceof Error ? err.message : err) }, 'error');
+  }
+}
+
+function refreshSheetCells() {
+  if (!sheet) return;
+  const gap = +(/** @type {HTMLInputElement} */ ($('sheet-gap')).value);
+  $('sheet-gap-label').textContent = String(gap);
+
+  sheet.cells = detectCells(sheet.image, { gap });
+  const guessed = guessViews(sheet.cells);
+  // guessViews only names front, right and top when the sizes leave no doubt;
+  // anything else is reading order, which is a guess and should not claim to be
+  // more than that.
+  const confident =
+    sheet.cells.length === 3 &&
+    ['front', 'right', 'top'].every((name) => guessed.includes(name));
+
+  $('sheet-summary').textContent = sheet.cells.length === 0
+    ? t('sheet.none')
+    : t(confident ? 'sheet.summaryGuessed' : 'sheet.summary', {
+        n: sheet.cells.length,
+        w: sheet.image.width,
+        h: sheet.image.height,
+      });
+
+  const host = $('sheet-cells');
+  host.innerHTML = '';
+  sheet.cells.forEach((cell, i) => {
+    const box = document.createElement('div');
+    box.className = 'sheet-cell' + (guessed[i] ? ' assigned' : '');
+
+    const canvas = document.createElement('canvas');
+    canvas.width = cell.w;
+    canvas.height = cell.h;
+    const ctx = canvas.getContext('2d');
+    if (ctx && sheet) {
+      const crop = cropCell(sheet.image, cell);
+      ctx.putImageData(new ImageData(crop.data, crop.width, crop.height), 0, 0);
+    }
+
+    const size = document.createElement('span');
+    size.className = 'size';
+    size.textContent = cell.w + '×' + cell.h;
+
+    const select = document.createElement('select');
+    select.dataset.cell = String(i);
+    const skip = document.createElement('option');
+    skip.value = '';
+    skip.textContent = t('sheet.ignore');
+    select.appendChild(skip);
+    for (const name of VIEW_NAMES) {
+      const option = document.createElement('option');
+      option.value = name;
+      option.textContent = t('views.' + name);
+      select.appendChild(option);
+    }
+    select.value = guessed[i] ?? '';
+    select.addEventListener('change', () => {
+      box.classList.toggle('assigned', !!select.value);
+    });
+
+    box.append(canvas, size, select);
+    host.appendChild(box);
+  });
+}
+
+function applySheet() {
+  if (!sheet) return;
+
+  /** @type {Array<[string, number]>} */
+  const chosen = [];
+  for (const el of $('sheet-cells').querySelectorAll('select')) {
+    const select = /** @type {HTMLSelectElement} */ (el);
+    if (select.value) chosen.push([select.value, +(select.dataset.cell ?? 0)]);
+  }
+  if (chosen.length === 0) return;
+
+  // A sheet replaces the whole set of views. Keeping leftovers from an earlier
+  // load would quietly carve against art the artist has already moved on from.
+  state.views.clear();
+  for (const [name, index] of chosen) {
+    const crop = cropCell(sheet.image, sheet.cells[index]);
+    setView(name, /** @type {any} */ (crop));
+  }
+  autoGrid();
+  refreshSlots();
+  build();
 }
 
 // ----------------------------------------------------------------- editor
@@ -1134,6 +1240,21 @@ function init() {
   $('btn-export-frames').addEventListener('click', exportFrames);
   $('btn-export-obj').addEventListener('click', doExportObj);
   $('btn-export-vox').addEventListener('click', doExportVox);
+
+  const sheetInput = /** @type {HTMLInputElement} */ ($('sheet-input'));
+  const sheetDialog = /** @type {HTMLDialogElement} */ ($('sheet-dialog'));
+  $('btn-sheet').addEventListener('click', () => sheetInput.click());
+  sheetInput.addEventListener('change', async () => {
+    const file = sheetInput.files?.[0];
+    if (file) await openSheet(file);
+    sheetInput.value = '';
+  });
+  $('sheet-gap').addEventListener('input', refreshSheetCells);
+  $('sheet-cancel').addEventListener('click', () => sheetDialog.close());
+  $('sheet-apply').addEventListener('click', () => {
+    applySheet();
+    sheetDialog.close();
+  });
 
   const smoothToggle = /** @type {HTMLInputElement} */ ($('obj-smooth'));
   const relaxRange = /** @type {HTMLInputElement} */ ($('obj-relax'));

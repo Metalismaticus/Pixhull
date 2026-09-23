@@ -505,3 +505,175 @@ input[type="range"] {
 #gl.tool-paint, #gl.tool-fill, #gl.tool-add { cursor: crosshair; }
 #gl.tool-erase { cursor: cell; }
 #gl.tool-pick { cursor: copy; }
+
+/* ---------------------------------------------------------- sheet slicing */
+
+.sheet-dialog {
+  background: var(--bg-panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 18px;
+  width: min(680px, 92vw);
+  max-height: 86vh;
+  overflow-y: auto;
+  font: inherit;
+}
+
+.sheet-dialog::backdrop {
+  background: #000a;
+  backdrop-filter: blur(2px);
+}
+
+.sheet-dialog h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+
+.sheet-dialog .field { margin: 12px 0; }
+
+.sheet-cells {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(116px, 1fr));
+  gap: 8px;
+  margin: 12px 0 16px;
+}
+
+.sheet-cell {
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 7px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+}
+
+.sheet-cell.assigned { border-color: var(--accent-dim); }
+
+.sheet-cell canvas {
+  image-rendering: pixelated;
+  width: 84px;
+  height: 84px;
+  object-fit: contain;
+  background:
+    linear-gradient(45deg, var(--checker-a) 25%, transparent 25%, transparent 75%, var(--checker-a) 75%) 0 0 / 8px 8px,
+    linear-gradient(45deg, var(--checker-a) 25%, transparent 25%, transparent 75%, var(--checker-a) 75%) 4px 4px / 8px 8px,
+    var(--checker-b);
+}
+
+.sheet-cell .size {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.sheet-cell select { width: 100%; font-size: 11px; padding: 3px 5px; }
+
+.sheet-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* ------------------------------------------------------------- doc pages */
+
+.doc-body { overflow: auto; display: block; }
+
+.page {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 28px 20px 80px;
+  line-height: 1.6;
+}
+
+.page h2 {
+  font-size: 22px;
+  margin-bottom: 8px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
+}
+
+.page h3 {
+  font-size: 15px;
+  margin: 32px 0 8px;
+  color: var(--text);
+}
+
+.page h4 {
+  font-size: 13px;
+  margin: 20px 0 6px;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.page p { margin: 10px 0; }
+.page ul { padding-left: 20px; }
+.page li { margin: 6px 0; }
+.page a { color: var(--accent); }
+
+.cta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin: 22px 0 6px;
+}
+
+/* Needs to out-specify `.page a`, which would otherwise paint the label the
+   same green as the button it sits on. */
+.page a.button-link,
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 10px 18px;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+  text-decoration: none;
+  border: 1px solid var(--accent);
+}
+.page a.button-link:hover { filter: brightness(1.12); color: var(--accent-ink); }
+
+.page pre {
+  position: relative;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.page pre code { white-space: pre; }
+.page code { font-family: var(--mono); font-size: 12px; }
+
+.page pre .copy {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  font-size: 10.5px;
+  padding: 3px 8px;
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity .12s;
+}
+.page pre:hover .copy, .page pre .copy:focus { opacity: 1; }
+.page pre .copy:hover { color: var(--text); border-color: var(--accent-dim); }
+
+.tool-list { margin: 12px 0; }
+.tool-list dt { margin-top: 12px; }
+.tool-list dd { margin: 3px 0 0 0; color: var(--text-dim); }
+
+.brand a.logo { display: block; }

@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pixhull — local app</title>
+<meta name="description" content="Run Pixhull locally and let an assistant drive it: carve voxel models from pixel art over files on your own disk, with no hosting and no account.">
+<script>
+  try {
+    var saved = localStorage.getItem('pixhull.theme');
+    document.documentElement.dataset.theme =
+      saved === 'light' || saved === 'dark'
+        ? saved
+        : (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+  } catch (e) {
+    document.documentElement.dataset.theme = 'dark';
+  }
+</script>
+<link rel="stylesheet" href="css/app.css">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/icon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="assets/icon-180.png">
+</head>
+<body class="doc-body">
+
+<header class="topbar">
+  <div class="brand">
+    <a class="logo" href="index.html" aria-label="Pixhull"></a>
+    <h1>Pixhull</h1>
+    <span class="tagline" data-i18n="dl.tagline"></span>
+  </div>
+  <div class="topbar-actions">
+    <a class="ghost link" href="index.html" data-i18n="dl.backToApp"></a>
+    <button id="btn-lang" class="ghost toggle" type="button" data-i18n-title="app.language">EN</button>
+    <button id="btn-theme" class="ghost toggle" type="button" data-i18n-title="app.theme">
+      <span id="theme-icon">◐</span>
+    </button>
+    <a class="ghost link" href="https://github.com/Metalismaticus/Pixhull" target="_blank" rel="noopener" data-i18n="app.source"></a>
+  </div>
+</header>
+
+<main class="page">
+
+  <h2 data-i18n="dl.heading"></h2>
+  <p data-i18n="dl.lede"></p>
+
+  <div class="cta">
+    <a class="primary button-link" href="https://github.com/Metalismaticus/Pixhull/archive/refs/heads/main.zip" data-i18n="dl.download"></a>
+    <span class="hint" data-i18n="dl.requirements"></span>
+  </div>
+
+  <p class="hint" data-i18n="dl.noInstall"></p>
+
+  <h3 data-i18n="dl.whatHeading"></h3>
+  <p data-i18n="dl.whatBody"></p>
+  <p data-i18n="dl.sameCore"></p>
+
+  <h3 data-i18n="dl.setupHeading"></h3>
+  <p data-i18n="dl.rootWarning"></p>
+
+  <h4 data-i18n="dl.claudeCode"></h4>
+  <pre data-copy><code>claude mcp add pixhull -- node /path/to/Pixhull/mcp/server.js /path/to/your/art</code></pre>
+
+  <h4 data-i18n="dl.claudeDesktop"></h4>
+  <p class="hint" data-i18n="dl.desktopWhere"></p>
+  <pre data-copy><code>{
+  "mcpServers": {
+    "pixhull": {
+      "command": "node",
+      "args": ["/path/to/Pixhull/mcp/server.js", "/path/to/your/art"]
+    }
+  }
+}</code></pre>
+  <p class="hint" data-i18n="dl.windowsPaths"></p>
+
+  <h4 data-i18n="dl.otherClients"></h4>
+  <p data-i18n="dl.otherClientsBody"></p>
+
+  <h3 data-i18n="dl.toolsHeading"></h3>
+  <dl class="tool-list">
+    <dt><code>carve_views</code></dt>
+    <dd data-i18n="dl.toolCarve"></dd>
+    <dt><code>render_preview</code></dt>
+    <dd data-i18n="dl.toolPreview"></dd>
+    <dt><code>export_model</code></dt>
+    <dd data-i18n="dl.toolExport"></dd>
+  </dl>
+
+  <p data-i18n="dl.exampleIntro"></p>
+  <pre data-copy><code>carve_views    { front: "hero-front.png", right: "hero-side.png", top: "hero-top.png" }
+               -> model_id: model-1, 1438 voxels, extent 12x10x22
+render_preview { model_id: "model-1", directions: 4 }
+               -> [image]
+export_model   { model_id: "model-1", format: "vox", name: "hero" }
+               -> wrote hero.vox</code></pre>
+
+  <h3 data-i18n="dl.checkHeading"></h3>
+  <p data-i18n="dl.checkBody"></p>
+  <pre data-copy><code>node tools/mcp-smoke.mjs</code></pre>
+
+  <h3 data-i18n="dl.webHeading"></h3>
+  <p data-i18n="dl.webBody"></p>
+  <pre data-copy><code>node tools/serve.mjs</code></pre>
+
+  <h3 data-i18n="dl.limitsHeading"></h3>
+  <ul>
+    <li data-i18n="dl.limitInterlace"></li>
+    <li data-i18n="dl.limitMemory"></li>
+    <li data-i18n="dl.limitEditing"></li>
+    <li data-i18n="dl.limitUntested"></li>
+  </ul>
+
+  <p class="hint">
+    <span data-i18n="dl.moreDetail"></span>
+    <a href="https://github.com/Metalismaticus/Pixhull/blob/main/mcp/README.md" target="_blank" rel="noopener">mcp/README.md</a>
+  </p>
+
+</main>
+
+<script type="module" src="src/download.js"></script>
+</body>
+</html>

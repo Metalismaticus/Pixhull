@@ -4,6 +4,7 @@ Turn front / side / top pixel art into a 3D voxel model, then export
 pixel-perfect sprite turnarounds and OBJ models.
 
 **[Open it &rarr;](https://metalismaticus.github.io/Pixhull/)** &nbsp;·&nbsp;
+[Run it locally](https://metalismaticus.github.io/Pixhull/download.html) &nbsp;·&nbsp;
 [Инструкция на русском](README.ru.md)
 
 Runs entirely in the browser. No install, no account, no server, no build step.
@@ -146,6 +147,21 @@ would.
 
 No dependencies there either: PNG decoding leans on the zlib already in Node,
 and the protocol is JSON-RPC over stdio, written directly.
+### One sheet in, views out
+
+Artists keep one PNG with the front, the side and the top laid out together,
+not three tidy files. Drop that in and Pixhull finds the drawings by their
+empty gutters — not by connected components, which would shatter a character
+with separated limbs into fragments, but by runs of transparent rows and
+columns, which is precisely what a person means by "these are different
+drawings".
+
+Then it works out which is which from their sizes, because orthographic views
+have to agree on the axes they share: front and right are the same height, top
+is as wide as front and as deep as right is wide. Usually exactly one
+arrangement satisfies all three, and it says so; otherwise it falls back to
+reading order and you fix it in a click. A model carved from a sliced sheet is
+voxel-for-voxel the one you get from three separate files.
 ### Any image size
 
 Views do not have to be square, do not have to match each other, and do not
@@ -193,6 +209,7 @@ Pages serves; there is nothing to build, so the repository root is the site.
 | [`src/core/volume.js`](src/core/volume.js) | Sparse 16³-chunked voxel storage, occupancy bitset + 6 palette bytes per voxel |
 | [`src/core/carve.js`](src/core/carve.js) | Silhouette intersection and per-face colour transfer |
 | [`src/core/views.js`](src/core/views.js) | Source images, trimming, placement, the view↔axis convention |
+| [`src/core/sheet.js`](src/core/sheet.js) | Slicing one reference sheet into views, and naming them by size |
 | [`src/gfx/camera.js`](src/gfx/camera.js) | Orthographic camera and the pixel-clean angle maths |
 | [`src/gfx/renderer.js`](src/gfx/renderer.js) | Instanced face renderer — one draw call for the whole model |
 | [`src/export/sprite.js`](src/export/sprite.js) | Turnaround rendering, sheet packing, palette snapping |

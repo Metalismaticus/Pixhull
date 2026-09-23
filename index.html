@@ -42,6 +42,7 @@
     <button id="btn-theme" class="ghost toggle" type="button" data-i18n-title="app.theme" aria-hidden="false">
       <span id="theme-icon">◐</span>
     </button>
+    <a class="ghost link" href="download.html" data-i18n="app.getLocal"></a>
     <a class="ghost link" href="https://github.com/Metalismaticus/Pixhull" id="repo-link" target="_blank" rel="noopener" data-i18n="app.source"></a>
   </div>
 </header>
@@ -54,6 +55,7 @@
     <p class="hint" data-i18n="views.hint"></p>
 
     <div id="view-slots" class="view-slots"></div>
+    <button id="btn-sheet" class="ghost small" type="button" data-i18n="sheet.open"></button>
 
     <div class="field">
       <label for="grid-size" data-i18n="grid.label"></label>
@@ -198,6 +200,24 @@
   </aside>
 </main>
 
+
+<dialog id="sheet-dialog" class="sheet-dialog">
+  <h2 data-i18n="sheet.heading"></h2>
+  <p class="hint" data-i18n="sheet.hint"></p>
+  <div class="field">
+    <label for="sheet-gap" data-i18n="sheet.gap"></label>
+    <input type="range" id="sheet-gap" min="1" max="12" step="1" value="1">
+    <span class="unit" id="sheet-gap-label">1</span>
+  </div>
+  <p class="hint" id="sheet-summary">—</p>
+  <div id="sheet-cells" class="sheet-cells"></div>
+  <div class="sheet-actions">
+    <button id="sheet-cancel" class="ghost" type="button" data-i18n="sheet.cancel"></button>
+    <button id="sheet-apply" class="primary" type="button" data-i18n="sheet.apply"></button>
+  </div>
+</dialog>
+
+<input type="file" id="sheet-input" accept="image/png,image/*" hidden>
 <input type="file" id="file-input" accept="image/png,image/*" hidden>
 <input type="file" id="project-input" accept="application/json,.pixhull,.json" hidden>
 
