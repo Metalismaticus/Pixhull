@@ -173,7 +173,7 @@ export class Renderer {
     gl.bindVertexArray(null);
     this.boxVertexCount = 0;
 
-    // A second wireframe, for the cuboid a box drag is about to apply.
+    // A second wireframe, for whatever the armed tool is about to touch.
     this.previewVao = gl.createVertexArray();
     this.previewBuffer = gl.createBuffer();
     gl.bindVertexArray(this.previewVao);
@@ -283,22 +283,24 @@ export class Renderer {
   }
 
   /**
-   * Outline the cuboid a box drag would apply, in inclusive voxel coordinates.
-   * @param {[number, number, number]} min
-   * @param {[number, number, number]} max
+   * The outline a tool is promising: any LINES vertex list, in voxel
+   * coordinates.
+   *
+   * Taking vertices rather than a cuboid is what lets one call cover all of
+   * them - a brush cube, two of them when the X mirror is on, a single face,
+   * and the border of a fill region, which is no box at all. The shapes are
+   * built in `src/edit/preview.js`, where they can be measured without a GPU.
+   *
+   * @param {Float32Array} positions 3 floats per vertex, 2 vertices per line
    */
-  setPreviewBox(min, max) {
+  setPreviewLines(positions) {
     const gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.previewBuffer);
-    gl.bufferData(
-      gl.ARRAY_BUFFER,
-      wireframe(min[0], min[1], min[2], max[0] + 1, max[1] + 1, max[2] + 1),
-      gl.DYNAMIC_DRAW
-    );
-    this.previewVertexCount = 24;
+    gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
+    this.previewVertexCount = (positions.length / 3) | 0;
   }
 
-  clearPreviewBox() {
+  clearPreview() {
     this.previewVertexCount = 0;
   }
 

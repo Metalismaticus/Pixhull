@@ -11,6 +11,7 @@
  */
 
 import { DIRS } from '../core/volume.js';
+import { addSeed } from './preview.js';
 
 export const TOOLS = /** @type {const} */ (['paint', 'fill', 'erase', 'add', 'pick', 'box', 'boxErase']);
 
@@ -116,26 +117,37 @@ export function applyBox(vol, extent, opts) {
  * @param {import('../core/volume.js').Volume} vol
  * @param {{x: number, y: number, z: number, face: number}} hit
  * @param {ToolOptions} opts
- * @returns {{changed: boolean, picked?: number}}
+ * @returns {{changed: boolean, count: number, capped: boolean, picked?: number}}
+ *   `count` is voxels for the brush tools and faces for fill; `capped` says the
+ *   fill stopped at its limit rather than at the edge of the surface.
  */
 export function applyTool(vol, hit, opts) {
   if (opts.tool === 'pick') {
-    return { changed: false, picked: vol.getFace(hit.x, hit.y, hit.z, hit.face) };
+    return { changed: false, count: 0, capped: false, picked: vol.getFace(hit.x, hit.y, hit.z, hit.face) };
   }
 
   const targets = opts.symmetryX ? [hit, mirrorX(vol, hit)] : [hit];
-  let changed = false;
+  let count = 0;
+  let capped = false;
   for (const target of targets) {
-    changed = runOne(vol, target, opts) || changed;
+    const one = runOne(vol, target, opts);
+    count += one.count;
+    capped = capped || one.capped;
   }
-  return { changed };
+  return { changed: count > 0, count, capped };
 }
 
 /**
+ * The same hit on the other side of the grid's X centre.
+ *
+ * Exported because the hover preview has to outline exactly what the mirrored
+ * edit will touch; a second copy of this rule in the UI would drift from this
+ * one, and the preview would start promising the wrong voxel.
+ *
  * @param {import('../core/volume.js').Volume} vol
  * @param {{x: number, y: number, z: number, face: number}} hit
  */
-function mirrorX(vol, hit) {
+export function mirrorX(vol, hit) {
   // A face pointing +X becomes one pointing -X on the far side, and vice versa.
   const face = hit.face === 0 ? 1 : hit.face === 1 ? 0 : hit.face;
   return { x: vol.nx - 1 - hit.x, y: hit.y, z: hit.z, face };
@@ -145,7 +157,7 @@ function mirrorX(vol, hit) {
  * @param {import('../core/volume.js').Volume} vol
  * @param {{x: number, y: number, z: number, face: number}} hit
  * @param {ToolOptions} opts
- * @returns {boolean}
+ * @returns {{count: number, capped: boolean}}
  */
 function runOne(vol, hit, opts) {
   const h = opts.history;
@@ -153,58 +165,60 @@ function runOne(vol, hit, opts) {
 
   if (opts.tool === 'paint') {
     if (opts.faceOnly && r === 0) {
-      if (!vol.get(hit.x, hit.y, hit.z)) return false;
-      if (vol.getFace(hit.x, hit.y, hit.z, hit.face) === opts.color) return false;
+      if (!vol.get(hit.x, hit.y, hit.z)) return NOTHING;
+      if (vol.getFace(hit.x, hit.y, hit.z, hit.face) === opts.color) return NOTHING;
       h?.touch(vol, hit.x, hit.y, hit.z);
       vol.setFace(hit.x, hit.y, hit.z, hit.face, opts.color);
-      return true;
+      return { count: 1, capped: false };
     }
-    let changed = false;
+    let count = 0;
     forEachInBrush(vol, hit, r, (x, y, z) => {
       if (!vol.get(x, y, z)) return;
       h?.touch(vol, x, y, z);
       if (opts.faceOnly) vol.setFace(x, y, z, hit.face, opts.color);
       else vol.setAllFaces(x, y, z, opts.color);
-      changed = true;
+      count++;
     });
-    return changed;
+    return { count, capped: false };
   }
 
   if (opts.tool === 'erase') {
-    let changed = false;
+    let count = 0;
     forEachInBrush(vol, hit, r, (x, y, z) => {
       if (!vol.get(x, y, z)) return;
       h?.touch(vol, x, y, z);
       for (let d = 0; d < 6; d++) h?.touch(vol, x + DIRS[d][0], y + DIRS[d][1], z + DIRS[d][2]);
       vol.set(x, y, z, false);
-      changed = true;
+      count++;
     });
-    if (changed) healAround(vol, hit, r + 1, opts.color, h);
-    return changed;
+    if (count > 0) healAround(vol, hit, r + 1, opts.color, h);
+    return { count, capped: false };
   }
 
   if (opts.tool === 'add') {
-    const n = DIRS[hit.face];
-    const seed = { x: hit.x + n[0], y: hit.y + n[1], z: hit.z + n[2], face: hit.face };
-    let changed = false;
+    const seed = addSeed(hit);
+    let count = 0;
     forEachInBrush(vol, seed, r, (x, y, z) => {
       if (vol.get(x, y, z)) return;
       h?.touch(vol, x, y, z);
       for (let d = 0; d < 6; d++) h?.touch(vol, x + DIRS[d][0], y + DIRS[d][1], z + DIRS[d][2]);
       vol.set(x, y, z, true);
       vol.setAllFaces(x, y, z, opts.color);
-      changed = true;
+      count++;
     });
-    if (changed) healAround(vol, seed, r + 1, opts.color, h);
-    return changed;
+    if (count > 0) healAround(vol, seed, r + 1, opts.color, h);
+    return { count, capped: false };
   }
 
   if (opts.tool === 'fill') {
     return fillSurface(vol, hit, opts.color, h);
   }
 
-  return false;
+  return NOTHING;
 }
+
+/** Shared "the tool did not touch anything" answer. */
+const NOTHING = /** @type {const} */ ({ count: 0, capped: false });
 
 /**
  * Visit a cube of voxels centred on the hit.
@@ -252,23 +266,29 @@ function healAround(vol, c, r, color, h) {
 }
 
 /** Stop a runaway fill from locking the tab on a large model. */
-const FILL_LIMIT = 400000;
+export const FILL_LIMIT = 400000;
 
 /**
- * Bucket fill across the visible surface: spreads to faces of the same colour
- * and the same facing that are connected by sight, following staircases up and
- * down rather than stopping at the edge of a flat plane.
+ * The faces a bucket fill would reach, without writing anything.
+ *
+ * Split out of `fillSurface` so the hover preview can outline the region it is
+ * about to change with the very same walk that will change it. A preview that
+ * disagreed with the edit would be worse than no preview, and two copies of a
+ * flood fill would disagree sooner or later.
+ *
+ * The fill spreads to faces of the same colour and the same facing that are
+ * connected by sight, following staircases up and down rather than stopping at
+ * the edge of a flat plane.
  *
  * @param {import('../core/volume.js').Volume} vol
  * @param {{x: number, y: number, z: number, face: number}} hit
- * @param {number} color
- * @param {import('./history.js').History} [h]
- * @returns {boolean}
+ * @param {number} [limit] stop after this many faces
+ * @returns {{cells: Array<[number, number, number]>, target: number, capped: boolean}}
  */
-function fillSurface(vol, hit, color, h) {
+export function collectFillRegion(vol, hit, limit = FILL_LIMIT) {
   const face = hit.face;
   const target = vol.getFace(hit.x, hit.y, hit.z, face);
-  if (target === color || !vol.get(hit.x, hit.y, hit.z)) return false;
+  if (!vol.get(hit.x, hit.y, hit.z)) return { cells: [], target, capped: false };
 
   const n = DIRS[face];
   // The four directions lying in the face's plane.
@@ -279,15 +299,12 @@ function fillSurface(vol, hit, color, h) {
 
   const key = (x, y, z) => x + vol.nx * (y + vol.ny * z);
   const seen = new Set([key(hit.x, hit.y, hit.z)]);
+  /** @type {Array<[number, number, number]>} */
   const queue = [[hit.x, hit.y, hit.z]];
-  let changed = false;
 
-  for (let head = 0; head < queue.length && seen.size < FILL_LIMIT; head++) {
+  let head = 0;
+  for (; head < queue.length && queue.length < limit; head++) {
     const [x, y, z] = queue[head];
-    h?.touch(vol, x, y, z);
-    vol.setFace(x, y, z, face, color);
-    changed = true;
-
     for (const p of perp) {
       // Same level, then one step out, then one step in - a voxel staircase
       // reads as one continuous surface to the eye, so the fill follows it.
@@ -309,5 +326,32 @@ function fillSurface(vol, hit, color, h) {
     }
   }
 
-  return changed;
+  // Reaching the limit means the walk stopped with neighbours still unvisited,
+  // and the caller has to say so rather than report the cap as the answer.
+  return { cells: queue, target, capped: head < queue.length };
+}
+
+/**
+ * Bucket fill across the visible surface.
+ *
+ * @param {import('../core/volume.js').Volume} vol
+ * @param {{x: number, y: number, z: number, face: number}} hit
+ * @param {number} color
+ * @param {import('./history.js').History} [h]
+ * @returns {{count: number, capped: boolean}}
+ */
+function fillSurface(vol, hit, color, h) {
+  const face = hit.face;
+  const target = vol.getFace(hit.x, hit.y, hit.z, face);
+  // The early return is what keeps a dragged fill cheap: once the surface
+  // already wears the new colour, every further sample costs one lookup
+  // (`tests/edit/fill-drag.mjs`).
+  if (target === color || !vol.get(hit.x, hit.y, hit.z)) return { count: 0, capped: false };
+
+  const region = collectFillRegion(vol, hit, FILL_LIMIT);
+  for (const [x, y, z] of region.cells) {
+    h?.touch(vol, x, y, z);
+    vol.setFace(x, y, z, face, color);
+  }
+  return { count: region.cells.length, capped: region.capped };
 }

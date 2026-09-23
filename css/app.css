@@ -440,7 +440,7 @@ button.linkish {
 .toolbar {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 4px;
+  gap: 6px;
 }
 
 .toolbar button {
@@ -463,26 +463,84 @@ button.linkish {
   font-weight: 600;
 }
 .toolbar .glyph { font-size: 14px; line-height: 1; }
+/* A label that wraps would make one button taller than its neighbours and
+   break the 3x3 grid; the full name and the hotkey live in `title`. */
+.toolbar button span:not(.glyph) {
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.toolbar button:focus-visible { outline: 1px solid var(--accent-dim); outline-offset: 0; }
 
-.palette-strip {
+/*
+ * The palette is a box with an edge, not a strip that runs off the bottom of
+ * the panel. 192px is chosen so the eighth row of swatches is cut in half:
+ * a half-row is the plainest possible way to say "there is more below", and it
+ * costs no shadow, no gradient and no extra element. 180px of content over a
+ * 24px row (20 + 4 gap) is 7.5 rows.
+ */
+.palette-box {
+  /* The panel is a flex column, so a box with a scroller of its own would be
+     squeezed to nothing by its siblings unless it refuses to shrink. */
+  flex: 0 0 auto;
+  max-height: 192px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
   display: flex;
-  flex-wrap: wrap;
-  gap: 3px;
-  min-height: 20px;
+  flex-direction: column;
+  /* Hues are separated by a wider gap than swatches within one hue: that gap
+     is the only grouping mark there is, because labels would eat half the box. */
+  gap: 10px;
 }
 
-.palette-strip button {
+.palette-band {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.palette-box button {
   width: 20px;
   height: 20px;
   padding: 0;
-  border-radius: 3px;
+  border-radius: 4px;
   border: 1px solid var(--line);
   cursor: pointer;
 }
-.palette-strip button:hover { transform: scale(1.12); }
-.palette-strip button.on {
+.palette-box button:hover { transform: scale(1.12); }
+.palette-box button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--bg-sunken), 0 0 0 3px var(--accent-dim);
+}
+.palette-box button.on {
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--bg-panel), 0 0 0 3px var(--accent);
+  box-shadow: 0 0 0 2px var(--bg-sunken), 0 0 0 3px var(--accent);
+}
+/* A colour no face in the model wears. It is dimmed for the same reason a
+   disabled control is: it is not doing anything. */
+.palette-box button.unused { opacity: 0.45; }
+
+.palette-box.empty { min-height: 56px; justify-content: center; }
+.palette-box .hint { text-align: center; padding: 0 2px; }
+
+/*
+ * One line about the selected swatch. Deliberately not `.stats`: that one is
+ * pushed to the bottom of the panel with `margin-top: auto` and draws a rule
+ * above itself, which in mid-column reads as a section break that is not there.
+ */
+.palette-foot {
+  margin: 0;
+  min-height: 16px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 input[type="color"] {

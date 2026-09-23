@@ -3,7 +3,7 @@
  * App wiring: source views in, voxels out, sprites and OBJ out the other side.
  */
 
-import { Palette } from './core/palette.js';
+import { Palette, PALETTE_MAX } from './core/palette.js';
 import { SourceView, VIEW_NAMES, suggestGridSize, fitViews } from './core/views.js';
 import { decodeImage, toImageData } from './ui/decode.js';
 import { carve } from './core/carve.js';
@@ -21,9 +21,17 @@ import { t, num, getLang, setLang, applyTranslations } from './i18n.js';
 import { detectTheme, getTheme, setTheme, toggleTheme, cssColorToGl } from './ui/theme.js';
 import { screenRay, raycastVoxel, rayPlanePoint } from './edit/pick.js';
 import { History } from './edit/history.js';
-import { applyTool, boxExtent, applyBox } from './edit/tools.js';
+import { applyTool, boxExtent, applyBox, collectFillRegion, mirrorX } from './edit/tools.js';
+import { boxEdges, faceEdges, regionOutline, brushExtent, addSeed, joinLines } from './edit/preview.js';
+import { paletteBands, paletteOrder } from './edit/palette-order.js';
 import { strokeSamples, strokeStepPx } from './edit/stroke.js';
 import { serializeVolume, deserializeVolume } from './core/serialize.js';
+
+/**
+ * The tool Alt was borrowed from, or null when Alt is not held.
+ * @type {typeof state.tool | null}
+ */
+let altBorrowedFrom = null;
 
 /** @param {string} id */
 const $ = (id) => {
@@ -101,10 +109,23 @@ function status(key, params, level = 'info') {
   renderStatus();
 }
 
+/**
+ * What the pointer is over right now, shown on top of `lastStatus`.
+ *
+ * An overlay rather than a replacement, so moving the mouse never costs the
+ * user the report of the edit they just made: the moment the cursor leaves the
+ * model the previous message is simply visible again.
+ * @type {{key: string, params?: Record<string, string|number|string[]>} | null}
+ */
+let hoverLine = null;
+
 function renderStatus() {
   const el = $('statusbar');
-  el.textContent = t(lastStatus.key, lastStatus.params);
-  el.className = 'statusbar' + (lastStatus.level === 'info' ? '' : ' ' + lastStatus.level);
+  const shown = hoverLine
+    ? { key: hoverLine.key, params: hoverLine.params, level: /** @type {const} */ ('info') }
+    : lastStatus;
+  el.textContent = t(shown.key, shown.params);
+  el.className = 'statusbar' + (shown.level === 'info' ? '' : ' ' + shown.level);
 }
 
 // ----------------------------------------------------------- source views
@@ -334,6 +355,8 @@ function build() {
   refreshHistoryButtons();
   renderer.setPalette(state.palette);
   refreshPalette();
+  scheduleUsage();
+  clearHover();
   const faces = renderer.setVolume(volume);
 
   const box = volume.bounds();
@@ -623,6 +646,12 @@ const TOOL_BUTTONS = [
   { id: 'boxErase', key: 'tool.boxErase', glyph: '⬚', hotkey: 't' },
 ];
 
+/** Tools that work one face at a time, so a brush size would mean nothing. */
+const ONE_FACE_TOOLS = new Set(['orbit', 'fill', 'pick']);
+
+/** Axis names for the hover line. Not translated: they are axes, not words. */
+const FACE_NAMES = ['+X', '\u2212X', '+Y', '\u2212Y', '+Z', '\u2212Z'];
+
 function buildToolBar() {
   const host = $('tool-bar');
   host.innerHTML = '';
@@ -630,6 +659,10 @@ function buildToolBar() {
     const b = document.createElement('button');
     b.type = 'button';
     b.dataset.tool = tool.id;
+    // One radio group, so eight tools cost one tab stop instead of eight and
+    // the arrow keys move the choice - the behaviour a chooser is expected to
+    // have, and what keeps the palette below within reach of the keyboard.
+    b.setAttribute('role', 'radio');
     b.title = t(tool.key) + '  (' + tool.hotkey.toUpperCase() + ')';
     const glyph = document.createElement('span');
     glyph.className = 'glyph';
@@ -647,22 +680,194 @@ function buildToolBar() {
 function setTool(tool) {
   state.tool = tool;
   markActiveTool();
+  refreshToolControls();
+  // The old tool's promise is no longer true; the new one makes its own on the
+  // next pointer move.
+  clearHover();
 }
 
 function markActiveTool() {
   for (const b of $('tool-bar').querySelectorAll('button')) {
-    b.classList.toggle('on', /** @type {HTMLElement} */ (b).dataset.tool === state.tool);
+    const el = /** @type {HTMLElement} */ (b);
+    const on = el.dataset.tool === state.tool;
+    el.classList.toggle('on', on);
+    el.setAttribute('aria-checked', on ? 'true' : 'false');
+    el.tabIndex = on ? 0 : -1;
   }
   canvas.className = state.tool === 'orbit' ? '' : 'tool-' + state.tool;
 }
 
 /**
+ * The hint under the toolbar, and the controls the chosen tool does not use.
+ *
+ * A control that goes dark without a reason beside it is a defect in this
+ * project's terms (`docs/DESIGN.md`, section 6), so each one that goes dark
+ * brings its own line saying why.
+ */
+function refreshToolControls() {
+  $('tool-hint').textContent = t(isBoxTool() ? 'edit.boxHint' : 'tool.' + state.tool + '.hint');
+
+  const brush = /** @type {HTMLInputElement} */ ($('brush-size'));
+  const brushOff = ONE_FACE_TOOLS.has(state.tool);
+  brush.disabled = brushOff;
+  $('brush-label').textContent = brushOff ? '\u2014' : (state.brush * 2 + 1) + '\u00b3';
+  $('brush-note').classList.toggle('hidden', !brushOff);
+
+  const faceOnly = /** @type {HTMLInputElement} */ ($('face-only'));
+  const faceOff = state.tool !== 'paint';
+  // Disabling keeps the checkbox's value, so the setting comes back with the
+  // brush instead of being silently reset every time another tool is used.
+  faceOnly.disabled = faceOff;
+  $('face-only-note').classList.toggle('hidden', !faceOff);
+}
+
+// --------------------------------------------------------- palette panel
+
+/**
+ * How many exposed faces each palette slot paints, and whether the walk
+ * finished.
+ * @type {{counts: Uint32Array, complete: boolean, measured: boolean}}
+ */
+let usage = { counts: new Uint32Array(256), complete: false, measured: false };
+let usageTimer = 0;
+
+/**
+ * Budgets for the usage count. Neither number came from the owner.
+ *
+ * The count walks every solid voxel, so it must never run inside a stroke: it
+ * waits for the hand to stop (300 ms) and then gets 100 ms to finish. A model
+ * too large for that reports "not counted" rather than zero, because zero
+ * would be read as "this colour is unused" and would dim swatches that paint
+ * half the model.
+ */
+const USAGE_DELAY_MS = 300;
+const USAGE_BUDGET_MS = 100;
+
+function scheduleUsage() {
+  clearTimeout(usageTimer);
+  usageTimer = setTimeout(recountUsage, USAGE_DELAY_MS);
+}
+
+function recountUsage() {
+  if (!state.volume) {
+    usage = { counts: new Uint32Array(256), complete: true, measured: true };
+  } else {
+    const r = state.volume.countExposedFaces(performance.now() + USAGE_BUDGET_MS);
+    usage = { counts: r.counts, complete: r.complete, measured: true };
+  }
+  applyUsage();
+}
+
+/** Push the counts onto the swatches without rebuilding any of them. */
+function applyUsage() {
+  for (const el of $('palette-box').querySelectorAll('button')) {
+    const b = /** @type {HTMLElement} */ (el);
+    const i = +(b.dataset.slot ?? 0);
+    b.classList.toggle('unused', usage.measured && usage.complete && usage.counts[i] === 0);
+    b.title = swatchTitle(i);
+  }
+  updatePaletteFoot();
+}
+
+/**
+ * One line about a slot: which one it is, what colour, how much of the model
+ * it paints. The count lives here and under the box rather than on the swatch
+ * itself - six digits do not fit in 20 px at any size this project allows.
+ * @param {number} i
+ */
+function swatchLine(i) {
+  const hex = state.palette.hex(i);
+  if (!usage.measured || !usage.complete) return t('edit.swatchUncounted', { i, hex });
+  const n = usage.counts[i];
+  return n === 0 ? t('edit.swatchUnused', { i, hex }) : t('edit.swatchInfo', { i, hex, n });
+}
+
+/** @param {number} i */
+function swatchTitle(i) {
+  // The double-click affordance rides along: the tooltip is the only place it
+  // is announced at all.
+  return swatchLine(i) + ' \u00b7 ' + t('edit.recolour');
+}
+
+function updatePaletteFoot() {
+  $('palette-foot').textContent = state.palette.size > 1 ? swatchLine(state.color) : '';
+}
+
+/**
+ * Rebuild the whole box: for when the set of colours changes, not when the
+ * selection moves.
+ */
+function refreshPalette() {
+  const host = $('palette-box');
+  host.innerHTML = '';
+  if (state.color >= state.palette.size) state.color = Math.max(1, state.palette.size - 1);
+
+  const empty = state.palette.size <= 1;
+  host.classList.toggle('empty', empty);
+  if (empty) {
+    const p = document.createElement('p');
+    p.className = 'hint';
+    p.textContent = t('edit.paletteEmpty');
+    host.appendChild(p);
+  } else {
+    // Bands are hue; the one wider gap between them is the whole notation.
+    for (const band of paletteBands(state.palette)) {
+      const row = document.createElement('div');
+      row.className = 'palette-band';
+      for (const i of band) row.appendChild(makeSwatch(i));
+      host.appendChild(row);
+    }
+  }
+
+  $('palette-full-note').classList.toggle('hidden', state.palette.size < PALETTE_MAX);
+  applyUsage();
+}
+
+/** @param {number} i */
+function makeSwatch(i) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.setAttribute('role', 'radio');
+  b.dataset.slot = String(i);
+  b.style.background = state.palette.hex(i);
+  const on = i === state.color;
+  b.classList.toggle('on', on);
+  b.setAttribute('aria-checked', on ? 'true' : 'false');
+  // Roving tab stop: 255 colours must not cost 255 presses of Tab.
+  b.tabIndex = on ? 0 : -1;
+  return b;
+}
+
+/**
+ * Move the selection. Only the two swatches involved change, so choosing a
+ * colour never rebuilds the box under the cursor.
+ * @param {number} i
+ */
+function selectSwatch(i) {
+  if (!i || i >= state.palette.size) return;
+  state.color = i;
+  for (const el of $('palette-box').querySelectorAll('button')) {
+    const b = /** @type {HTMLElement} */ (el);
+    const on = +(b.dataset.slot ?? 0) === i;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-checked', on ? 'true' : 'false');
+    b.tabIndex = on ? 0 : -1;
+  }
+  updatePaletteFoot();
+}
+
+/** @param {number} i */
+function focusSwatch(i) {
+  const b = /** @type {HTMLElement|null} */ ($('palette-box').querySelector('[data-slot="' + i + '"]'));
+  b?.focus();
+}
+
+/**
  * Which swatch an event landed on, or 0.
  *
- * The strip is rebuilt whenever the selection changes, so its buttons are not
- * the same nodes from one click to the next. Listening on the strip instead of
- * on each button is what lets a double-click survive the rebuild the first
- * click causes - and keeps one pair of listeners instead of 255.
+ * Listening on the box rather than on each button is what lets a double-click
+ * survive any redraw the first click causes - and keeps one pair of listeners
+ * instead of 255.
  * @param {Event} e
  */
 function swatchSlot(e) {
@@ -671,38 +876,21 @@ function swatchSlot(e) {
   return slot ? +slot : 0;
 }
 
-function refreshPalette() {
-  const host = $('palette-strip');
-  host.innerHTML = '';
-  for (let i = 1; i < state.palette.size; i++) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.dataset.slot = String(i);
-    b.style.background = state.palette.hex(i);
-    b.title = swatchTitle(i);
-    b.classList.toggle('on', i === state.color);
-    host.appendChild(b);
-  }
-  if (state.color >= state.palette.size) state.color = Math.max(1, state.palette.size - 1);
-}
-
-/** @param {number} i */
-function swatchTitle(i) {
-  return state.palette.hex(i) + ' - ' + t('edit.recolour');
-}
-
 /**
- * Repaint one swatch without rebuilding the strip.
+ * Repaint one swatch without rebuilding the box.
  *
  * A picker drag fires an event per pointer move, and rebuilding 255 buttons
- * each time is what would make an instant operation feel slow.
+ * each time is what would make an instant operation feel slow. A recoloured
+ * slot can belong in another band, so the box is re-sorted once, when the drag
+ * ends - never under the cursor mid-drag.
  * @param {number} i
  */
 function updateSwatch(i) {
-  const b = /** @type {HTMLElement|null} */ ($('palette-strip').querySelector('[data-slot="' + i + '"]'));
+  const b = /** @type {HTMLElement|null} */ ($('palette-box').querySelector('[data-slot="' + i + '"]'));
   if (!b) return;
   b.style.background = state.palette.hex(i);
   b.title = swatchTitle(i);
+  updatePaletteFoot();
 }
 
 /**
@@ -751,9 +939,19 @@ function applyRecolour() {
 }
 
 function refreshHistoryButtons() {
-  /** @type {HTMLButtonElement} */ ($('btn-undo')).disabled = !state.history.canUndo;
-  /** @type {HTMLButtonElement} */ ($('btn-redo')).disabled = !state.history.canRedo;
+  const canUndo = state.history.canUndo;
+  const canRedo = state.history.canRedo;
+  /** @type {HTMLButtonElement} */ ($('btn-undo')).disabled = !canUndo;
+  /** @type {HTMLButtonElement} */ ($('btn-redo')).disabled = !canRedo;
+  // Two buttons that are dark only because nothing has happened yet do not
+  // each need their own reason written under them; one line for the pair, and
+  // it goes away for good the moment there is anything to undo.
+  if (canUndo || canRedo) everEdited = true;
+  $('history-note').classList.toggle('hidden', everEdited);
 }
+
+/** True once the model has been edited at all in this session. */
+let everEdited = false;
 
 /**
  * Where a pointer event lands in the model.
@@ -816,8 +1014,10 @@ function runToolAtPoint(sx, sy) {
   if (state.tool === 'pick') {
     const picked = state.volume.getFace(hit.x, hit.y, hit.z, hit.face);
     if (picked) {
-      state.color = picked;
-      refreshPalette();
+      selectSwatch(picked);
+      focusSwatch(picked);
+      hoverLine = null;
+      status('status.picked', { i: picked, hex: state.palette.hex(picked) });
     }
     return true;
   }
@@ -825,17 +1025,59 @@ function runToolAtPoint(sx, sy) {
   const result = applyTool(state.volume, hit, {
     tool: state.tool,
     color: state.color,
-    brush: state.brush,
+    brush: brushRadius(),
     faceOnly: /** @type {HTMLInputElement} */ ($('face-only')).checked,
     symmetryX: /** @type {HTMLInputElement} */ ($('symmetry-x')).checked,
     history: state.history,
   });
+
+  // The number the user is shown is the whole stroke's, not one pointer
+  // event's: the stroke is one undo step, so it is one report too.
+  strokeCount += result.count;
+  strokeCapped = strokeCapped || result.capped;
 
   if (result.changed) {
     state.geometryDirty = true;
     state.dirty = true;
   }
   return true;
+}
+
+/**
+ * The brush radius the armed tool actually uses. Fill and Pick work one face
+ * at a time whatever the slider says, and the preview must promise what will
+ * happen, not what the slider reads.
+ */
+function brushRadius() {
+  return ONE_FACE_TOOLS.has(state.tool) ? 0 : state.brush;
+}
+
+/** Faces or voxels the current stroke has changed so far. */
+let strokeCount = 0;
+let strokeCapped = false;
+
+/**
+ * Say what the finished stroke did, in a number.
+ *
+ * Until now only the box drag reported; a brush of 729 voxels and a fill of up
+ * to 400 000 faces both finished in silence, and the fill was cut off at its
+ * limit without a word.
+ */
+function reportStroke() {
+  if (state.tool === 'orbit' || state.tool === 'pick') return;
+  // The report has to win over the hover line, or the cursor sitting where it
+  // just painted would hide the answer.
+  hoverLine = null;
+
+  if (state.tool === 'fill') {
+    if (strokeCapped) status('status.filledCapped', { n: strokeCount }, 'warn');
+    else if (strokeCount > 0) status('status.filled', { n: strokeCount });
+    else status('status.editedNothing', undefined, 'warn');
+    return;
+  }
+
+  if (strokeCount > 0) status('status.edited', { n: strokeCount, tool: t('tool.' + state.tool) });
+  else status('status.editedNothing', undefined, 'warn');
 }
 
 function undo() {
@@ -868,6 +1110,7 @@ function afterHistoryStep(kind) {
     refreshPalette();
   } else {
     state.geometryDirty = true;
+    scheduleUsage();
   }
   state.dirty = true;
   refreshHistoryButtons();
@@ -937,7 +1180,7 @@ function boxCornerAt(e, anchor) {
 function updateBoxDrag(e) {
   if (!boxDrag || !state.volume) return;
   const corner = boxCornerAt(e, boxDrag.anchor);
-  const extent = boxExtent(boxDrag.anchor, corner, state.brush + 1, state.tool === 'box');
+  const extent = boxExtent(boxDrag.anchor, corner, brushRadius() + 1, state.tool === 'box');
   const vol = state.volume;
   const dims = [vol.nx, vol.ny, vol.nz];
   for (let i = 0; i < 3; i++) {
@@ -945,14 +1188,14 @@ function updateBoxDrag(e) {
     extent.max[i] = Math.max(0, Math.min(dims[i] - 1, extent.max[i]));
   }
   boxDrag.extent = extent;
-  renderer.setPreviewBox(extent.min, extent.max);
+  renderer.setPreviewLines(boxEdges(extent.min, extent.max));
   state.dirty = true;
 }
 
 function commitBoxDrag() {
   const drag = boxDrag;
   boxDrag = null;
-  renderer.clearPreviewBox();
+  renderer.clearPreview();
   state.dirty = true;
   if (!drag || !state.volume) return;
 
@@ -966,6 +1209,8 @@ function commitBoxDrag() {
   if (changed > 0) {
     state.geometryDirty = true;
     if (state.history.commit(state.volume)) refreshHistoryButtons();
+    scheduleUsage();
+    hoverLine = null;
     status('status.boxApplied', {
       n: changed,
       w: drag.extent.max[0] - drag.extent.min[0] + 1,
@@ -1014,6 +1259,180 @@ function continueStroke(e) {
   }
 }
 
+/* --------------------------------------------------------- hover preview */
+
+/**
+ * What the armed tool promises, drawn before the click that makes it true.
+ *
+ * Only the box drag showed its reach before this; a brush of up to 729 voxels
+ * and a fill of up to 400 000 faces both went in blind. The outline is built
+ * from the same coordinates the edit will use - `brushExtent`, `addSeed`,
+ * `mirrorX` and `collectFillRegion` are shared with `applyTool`, not copied -
+ * so the promise cannot drift away from the deed.
+ */
+
+/**
+ * How long the cursor has to sit still on one face before a fill region is
+ * worked out, and how many faces that walk is allowed.
+ *
+ * Neither number came from the owner. A fill can reach 400 000 faces, which is
+ * not something to compute on every mouse move; 150 ms is short enough to feel
+ * immediate and long enough that crossing a surface costs nothing. The 20 000
+ * cap is about a tenth of the real limit: past it the outline is drawn from
+ * what was counted and the status line says "and more", because promising a
+ * number that was never reached would be worse than admitting the limit.
+ */
+const FILL_PREVIEW_IDLE_MS = 150;
+const FILL_PREVIEW_LIMIT = 20000;
+
+/** The voxel face under the cursor, packed, or null. */
+let hoverKey = null;
+let hoverTimer = 0;
+/** The hover line without the tool's tail, so the fill can append to it late. */
+let hoverBase = '';
+
+function clearHover() {
+  hoverKey = null;
+  hoverBase = '';
+  clearTimeout(hoverTimer);
+  renderer.clearPreview();
+  state.dirty = true;
+  if (hoverLine) {
+    hoverLine = null;
+    renderStatus();
+  }
+}
+
+/**
+ * @param {string} key i18n key
+ * @param {Record<string, string|number>} params
+ */
+function setHoverLine(key, params) {
+  hoverLine = { key, params };
+  renderStatus();
+}
+
+/**
+ * @param {PointerEvent} e
+ */
+function updateHover(e) {
+  const vol = state.volume;
+  if (!vol || state.tool === 'orbit' || boxDrag) {
+    clearHover();
+    return;
+  }
+  const [sx, sy] = canvasPoint(e);
+  const hit = hitAtPoint(sx, sy);
+  if (!hit) {
+    clearHover();
+    return;
+  }
+
+  const key = ((hit.x * vol.ny + hit.y) * vol.nz + hit.z) * 6 + hit.face;
+  // Everything below costs a raycast or worse, and a hand crossing a face
+  // sends dozens of events over it. Nothing changes until the face does.
+  if (key === hoverKey) return;
+  hoverKey = key;
+  clearTimeout(hoverTimer);
+
+  drawHover(hit);
+}
+
+/** @param {{x: number, y: number, z: number, face: number}} hit */
+function drawHover(hit) {
+  const vol = state.volume;
+  if (!vol) return;
+  const dims = /** @type {[number, number, number]} */ ([vol.nx, vol.ny, vol.nz]);
+  const slot = vol.getFace(hit.x, hit.y, hit.z, hit.face);
+
+  // Coordinates, face, colour and slot first: what is under the cursor comes
+  // before what the tool would do with it, and it has to fit in the first
+  // forty characters (`docs/DESIGN.md`, section 6).
+  const baseParams = {
+    x: hit.x, y: hit.y, z: hit.z,
+    face: FACE_NAMES[hit.face],
+    hex: state.palette.hex(slot),
+    i: slot,
+  };
+  hoverBase = t('status.hover', baseParams);
+
+  const mirror = /** @type {HTMLInputElement} */ ($('symmetry-x')).checked;
+  // Mirrored edits are invisible until they happen unless the promise is made
+  // twice, once on each side.
+  const hits = mirror && state.tool !== 'pick' ? [hit, mirrorX(vol, hit)] : [hit];
+
+  if (state.tool === 'fill') {
+    // The region is not walked yet; the outline waits for the hand to settle.
+    renderer.clearPreview();
+    state.dirty = true;
+    setHoverLine('status.hover', baseParams);
+    hoverTimer = setTimeout(() => previewFill(hits, dims), FILL_PREVIEW_IDLE_MS);
+    return;
+  }
+
+  const parts = hits.map((h) => toolOutline(h, dims));
+  renderer.setPreviewLines(joinLines(parts));
+  state.dirty = true;
+
+  if (state.tool === 'pick' || isBoxTool()) {
+    setHoverLine('status.hover', baseParams);
+  } else {
+    const side = brushRadius() * 2 + 1;
+    const faceOnly = /** @type {HTMLInputElement} */ ($('face-only')).checked;
+    const n = state.tool === 'paint' && faceOnly && brushRadius() === 0 ? 1 : side * side * side;
+    setHoverLine('status.hoverBrush', { base: hoverBase, n });
+  }
+}
+
+/**
+ * The outline of one application of the armed tool.
+ * @param {{x: number, y: number, z: number, face: number}} hit
+ * @param {[number, number, number]} dims
+ * @returns {Float32Array}
+ */
+function toolOutline(hit, dims) {
+  // The box tools draw their rectangle while dragging and nothing before it:
+  // there is no rectangle until a corner has been put down.
+  if (isBoxTool()) return new Float32Array(0);
+
+  const r = brushRadius();
+  if (state.tool === 'pick') return boxEdges([hit.x, hit.y, hit.z], [hit.x, hit.y, hit.z]);
+
+  const faceOnly = /** @type {HTMLInputElement} */ ($('face-only')).checked;
+  if (state.tool === 'paint' && faceOnly && r === 0) {
+    return faceEdges(hit.x, hit.y, hit.z, hit.face);
+  }
+
+  // Add lays its cube one voxel out along the normal - showing it on the face
+  // itself would point at the wrong voxel every time.
+  const centre = state.tool === 'add' ? addSeed(hit) : hit;
+  const extent = brushExtent(centre, r, dims);
+  return boxEdges(extent.min, extent.max);
+}
+
+/**
+ * Outline the faces a fill would reach, and say how many there are.
+ * @param {Array<{x: number, y: number, z: number, face: number}>} hits
+ * @param {[number, number, number]} dims
+ */
+function previewFill(hits, dims) {
+  const vol = state.volume;
+  if (!vol) return;
+  /** @type {Float32Array[]} */
+  const parts = [];
+  let count = 0;
+  let capped = false;
+  for (const h of hits) {
+    const region = collectFillRegion(vol, h, FILL_PREVIEW_LIMIT);
+    parts.push(regionOutline(region.cells, h.face, dims));
+    count += region.cells.length;
+    capped = capped || region.capped;
+  }
+  renderer.setPreviewLines(joinLines(parts));
+  state.dirty = true;
+  setHoverLine(capped ? 'status.hoverFillMore' : 'status.hoverFill', { base: hoverBase, n: count });
+}
+
 function setupPointer() {
   let mode = /** @type {null | 'orbit' | 'pan' | 'tool'} */ (null);
   let lastX = 0;
@@ -1046,15 +1465,23 @@ function setupPointer() {
     } else if (mode === 'tool') {
       state.history.begin();
       strokeLastHit = null;
+      strokeCount = 0;
+      strokeCapped = false;
       strokeLastPoint = canvasPoint(e);
       runToolAtPoint(strokeLastPoint[0], strokeLastPoint[1]);
     } else {
+      // Turning or panning moves the model out from under the outline, so the
+      // promise is withdrawn until the hand stops.
+      clearHover();
       canvas.classList.add('dragging');
     }
   });
 
   canvas.addEventListener('pointermove', (e) => {
-    if (!mode) return;
+    if (!mode) {
+      updateHover(e);
+      return;
+    }
     if (mode === 'tool') {
       if (boxDrag) updateBoxDrag(e);
       else continueStroke(e);
@@ -1082,6 +1509,8 @@ function setupPointer() {
     } else if (mode === 'tool' && state.volume) {
       // One undo step per stroke, not per voxel.
       if (state.history.commit(state.volume)) refreshHistoryButtons();
+      reportStroke();
+      scheduleUsage();
     }
     mode = null;
     strokeLastPoint = null;
@@ -1093,6 +1522,9 @@ function setupPointer() {
   };
   canvas.addEventListener('pointerup', end);
   canvas.addEventListener('pointercancel', end);
+  // Off the canvas there is nothing under the cursor to promise anything
+  // about, and the status bar goes back to the last real message.
+  canvas.addEventListener('pointerleave', clearHover);
 
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
@@ -1469,9 +1901,10 @@ function retranslate() {
   buildAngleChips();
   buildToolBar();
   refreshSlots();
-  // The swatch tooltips are built by hand from a colour and a phrase, so
-  // data-i18n cannot reach them.
+  // The swatch tooltips and the line under the box are built by hand from a
+  // colour and a phrase, so data-i18n cannot reach them.
   refreshPalette();
+  refreshToolControls();
   refreshLanguageButton();
   // Carries numbers, so it is written by hand rather than by data-i18n and has
   // to be asked to rewrite itself.
@@ -1499,23 +1932,62 @@ function init() {
   const brush = /** @type {HTMLInputElement} */ ($('brush-size'));
   brush.addEventListener('input', () => {
     state.brush = +brush.value;
-    const side = state.brush * 2 + 1;
-    $('brush-label').textContent = side + '³';
+    refreshToolControls();
+    // The outline promises a cube of the old size until it is told otherwise.
+    clearHover();
   });
 
   $('btn-undo').addEventListener('click', undo);
   $('btn-redo').addEventListener('click', redo);
 
-  const strip = $('palette-strip');
-  strip.addEventListener('click', (e) => {
+  const box = $('palette-box');
+  box.addEventListener('click', (e) => {
     const i = swatchSlot(e);
-    if (!i || i === state.color) return;
-    state.color = i;
-    refreshPalette();
+    if (i) selectSwatch(i);
   });
-  strip.addEventListener('dblclick', (e) => {
+  box.addEventListener('dblclick', (e) => {
     const i = swatchSlot(e);
     if (i) openRecolour(i);
+  });
+  box.addEventListener('keydown', (e) => {
+    const order = paletteOrder(state.palette);
+    if (order.length === 0) return;
+    const cur = order.indexOf(state.color);
+    let next = -1;
+    // Up and down step by one rather than by a row: how many swatches fit in a
+    // row depends on the panel's actual width, and a key whose meaning changed
+    // with the window would be worse than one that always moves by one.
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = Math.min(order.length - 1, cur + 1);
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = Math.max(0, cur - 1);
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = order.length - 1;
+    else if (e.key === 'F2') {
+      e.preventDefault();
+      if (state.color) openRecolour(state.color);
+      return;
+    } else {
+      return;
+    }
+    e.preventDefault();
+    const slot = order[Math.max(0, next)];
+    selectSwatch(slot);
+    focusSwatch(slot);
+  });
+
+  // The toolbar is one radio group, so the arrows move the choice inside it.
+  $('tool-bar').addEventListener('keydown', (e) => {
+    const ids = TOOL_BUTTONS.map((b) => b.id);
+    const cur = ids.indexOf(state.tool);
+    let next = -1;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = Math.min(ids.length - 1, cur + 1);
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = Math.max(0, cur - 1);
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = ids.length - 1;
+    else return;
+    e.preventDefault();
+    setTool(/** @type {any} */ (ids[Math.max(0, next)]));
+    /** @type {HTMLElement|null} */
+    ($('tool-bar').querySelector('[data-tool="' + state.tool + '"]'))?.focus();
   });
 
   const editColor = /** @type {HTMLInputElement} */ ($('edit-color'));
@@ -1527,6 +1999,9 @@ function init() {
     applyRecolour();
     state.history.endPalette();
     recolourSlot = 0;
+    // A new colour can belong in another band; re-sorting is deferred to here
+    // so it never happens under the cursor mid-drag.
+    refreshPalette();
   });
   editColor.addEventListener('blur', () => {
     state.history.endPalette();
@@ -1541,6 +2016,7 @@ function init() {
     state.color = idx;
     renderer.setPalette(state.palette);
     refreshPalette();
+    scheduleUsage();
     state.dirty = true;
     if (state.palette.size === before && state.palette.overflowed) status('status.paletteFull', undefined, 'warn');
     else status('status.colorAdded', { n: state.palette.size - 1 });
@@ -1689,10 +2165,38 @@ function init() {
       return;
     }
 
+    if (e.key === '[' || e.key === ']') {
+      const brush = /** @type {HTMLInputElement} */ ($('brush-size'));
+      if (brush.disabled) return;
+      const step = e.key === ']' ? 1 : -1;
+      state.brush = Math.max(+brush.min, Math.min(+brush.max, state.brush + step));
+      brush.value = String(state.brush);
+      refreshToolControls();
+      clearHover();
+      return;
+    }
+
+    // Alt is the picker on loan: hold it, take a colour, let go and the tool
+    // you were using is back, without a trip to the toolbar.
+    if (e.key === 'Alt' && altBorrowedFrom === null && state.tool !== 'pick') {
+      altBorrowedFrom = state.tool;
+      setTool('pick');
+      return;
+    }
+
     const tool = TOOL_BUTTONS.find((b) => b.hotkey === e.key.toLowerCase());
     if (tool) setTool(/** @type {any} */ (tool.id));
   });
 
+  window.addEventListener('keyup', (e) => {
+    if (e.key === 'Alt' && altBorrowedFrom !== null) {
+      const back = altBorrowedFrom;
+      altBorrowedFrom = null;
+      setTool(back);
+    }
+  });
+
+  refreshToolControls();
   updateFramePreview();
   loadDemo();
   requestAnimationFrame(frame);

@@ -189,6 +189,56 @@ export class Volume {
     }
   }
 
+  /**
+   * How many exposed faces each palette slot paints.
+   *
+   * Deliberately not `buildFaceInstances`: that one clears the dirty set as it
+   * goes, so borrowing it to answer a question about colours would leave the
+   * renderer believing it had already been given geometry it never received.
+   * This walk only reads.
+   *
+   * A big model can outrun any budget, so the walk stops on a deadline and
+   * says it stopped. A caller that shows "0" for a count it never finished is
+   * lying about which colours are unused.
+   *
+   * @param {number} [deadline] value of `performance.now()` to stop at
+   * @returns {{counts: Uint32Array, complete: boolean}} counts indexed by palette slot
+   */
+  countExposedFaces(deadline = Infinity) {
+    const counts = new Uint32Array(256);
+    let complete = true;
+    let chunksDone = 0;
+
+    for (const [id, c] of this.chunks) {
+      if (c.count === 0 || c.faces === null) continue;
+      const cxi = id % this.cx;
+      const cyi = ((id / this.cx) | 0) % this.cy;
+      const czi = (id / (this.cx * this.cy)) | 0;
+      const ox = cxi * CHUNK, oy = cyi * CHUNK, oz = czi * CHUNK;
+
+      for (let li = 0; li < CHUNK_VOX; li++) {
+        if ((c.solid[li >> 5] & (1 << (li & 31))) === 0) continue;
+        const x = ox + (li & 15), y = oy + ((li >> 4) & 15), z = oz + ((li >> 8) & 15);
+        for (let d = 0; d < 6; d++) {
+          const [dx, dy, dz] = DIRS[d];
+          if (this.get(x + dx, y + dy, z + dz)) continue;
+          const idx = c.faces[li * 6 + d];
+          if (idx !== 0) counts[idx]++;
+        }
+      }
+
+      // Checked between chunks, not between voxels: one chunk is 4096 voxels,
+      // which is far below any budget worth having, and a clock read per voxel
+      // would cost more than the walk.
+      if ((++chunksDone & 7) === 0 && performance.now() > deadline) {
+        complete = false;
+        break;
+      }
+    }
+
+    return { counts, complete };
+  }
+
   /** @returns {{min: [number,number,number], max: [number,number,number]}|null} */
   bounds() {
     if (this.solidCount === 0) return null;
