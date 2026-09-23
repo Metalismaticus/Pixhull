@@ -12,7 +12,7 @@ import { Renderer } from './gfx/renderer.js';
 import { OrthoCamera, PITCH_PRESETS, directionYaws, DEG } from './gfx/camera.js';
 import { renderTurnaround, packSheet, snapToPalette, imageDataToPng, downloadBlob } from './export/sprite.js';
 import { exportObj } from './export/obj.js';
-import { exportVox } from './export/vox.js';
+import { exportVox, VOX_MAX_SIZE } from './export/vox.js';
 import { exportGlb } from './export/gltf.js';
 import { buildSmoothMesh } from './export/surfacenets.js';
 import { makeZip, blobBytes } from './export/zip.js';
@@ -311,6 +311,7 @@ function build() {
   // meant pressing H fought an invisible flip - and locked the view into a state
   // that was never visible.
   refreshSlots();
+  refreshVoxAvailability();
   state.dirty = true;
 
   // Ordered by how badly each one invalidates the result. A drawing in the
@@ -1004,6 +1005,28 @@ async function doExportGlb() {
   }
 }
 
+/**
+ * Grey out the .vox button when the model is too big for the format.
+ *
+ * MagicaVoxel stores a model's size in one byte per axis, so 256 is the hard
+ * ceiling - ours to report, not ours to lift. Now that the grid goes to 512
+ * that stopped being a corner case, and finding out by pressing the button and
+ * reading an error is the wrong way round. The measurement is the model's own
+ * bounding box, not the grid: a small model on a 512 grid exports fine.
+ */
+function refreshVoxAvailability() {
+  const note = $('vox-note');
+  const button = /** @type {HTMLButtonElement} */ ($('btn-export-vox'));
+  const box = state.volume?.bounds();
+  const span = box
+    ? Math.max(box.max[0] - box.min[0], box.max[1] - box.min[1], box.max[2] - box.min[2]) + 1
+    : 0;
+  const tooBig = span > VOX_MAX_SIZE;
+  button.disabled = tooBig;
+  note.classList.toggle('hidden', !tooBig);
+  if (tooBig) note.textContent = t('model.voxTooBig', { span, max: VOX_MAX_SIZE });
+}
+
 async function doExportVox() {
   if (!state.volume) return;
   status('status.meshing');
@@ -1212,6 +1235,9 @@ function retranslate() {
   buildToolBar();
   refreshSlots();
   refreshLanguageButton();
+  // Carries numbers, so it is written by hand rather than by data-i18n and has
+  // to be asked to rewrite itself.
+  refreshVoxAvailability();
   renderStatus();
   updateStats(state.lastStats, renderer.instanceCount);
   updateFramePreview();

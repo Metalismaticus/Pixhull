@@ -264,6 +264,9 @@ function repaintSlopes(vol, raster, N, seen, field, box) {
             if (want < 0) break;
           }
           if (d === want) continue;
+          // And never from the view staring at this face's back: on a fin one
+          // voxel thick the far side would take the near side's colour.
+          if ((d ^ 1) === want) continue;
           const name = facing[want];
           if (!name) continue;
           const geom = VIEW_GEOM[name];

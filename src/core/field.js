@@ -114,8 +114,16 @@ export const FACE_DIRS = [
   [0, 0, 1], [0, 0, -1],
 ];
 
-/** How square-on the surface must face a direction before that direction is used. */
-const CONFIDENT = 0.5;
+/**
+ * How strong the blurred gradient has to be before the surface counts as
+ * sloped rather than as the edge between two flat faces.
+ */
+const SLOPED = 0.36;
+
+/** The two vertical face directions, and the four a view draws head-on. */
+const UP = 2;
+const DOWN = 3;
+const UPRIGHT = [0, 1, 4, 5];
 
 /** How close two directions have to be before the choice counts as tied. */
 const TIE = 0.08;
@@ -142,24 +150,43 @@ export function facingOf(field, x, y, z) {
   // Density rises into the solid, so the outward direction runs against it.
   const n = [-g[0], -g[1], -g[2]];
   const len = Math.hypot(n[0], n[1], n[2]);
-  if (len < 1e-6) return -1;
+  // Direction alone cannot tell a slope from the edge where two flat faces
+  // meet: on the top-front edge of a plain cube the blurred gradient points
+  // the same way a 45-degree wedge does, so the edge asks to be recoloured by
+  // a drawing that is not looking at it. Strength can tell them apart, and
+  // this is where the white corners and the white flecks came from. Measured
+  // at radius 2: a true 45-degree plane 0.509, a 2:1 slope 0.447, a flat face
+  // 0.400, a convex edge 0.339, a convex corner 0.249, a concave one 0.226.
+  if (len < SLOPED) return -1;
 
-  let best = -1;
-  let bestDot = -Infinity;
+  const dots = new Array(6);
+  let maxDot = -Infinity;
+  let maxDir = -1;
   for (let d = 0; d < 6; d++) {
     const dir = FACE_DIRS[d];
-    const dot = (n[0] * dir[0] + n[1] * dir[1] + n[2] * dir[2]) / len;
-    // Upright directions are tried first and keep a tie, so a 45-degree slope
-    // resolves to the drawing that carries the detail.
-    const upright = d !== 2 && d !== 3;
-    if (dot > bestDot + (upright ? -TIE : TIE)) {
-      bestDot = dot;
-      best = d;
+    dots[d] = (n[0] * dir[0] + n[1] * dir[1] + n[2] * dir[2]) / len;
+    if (dots[d] > maxDot) {
+      maxDot = dots[d];
+      maxDir = d;
     }
   }
-  // A surface has to point somewhere definite before its direction is worth
-  // acting on. Through a chassis rail two voxels thick the blur sees as much
-  // air as metal and the gradient wanders; taking a colour on that evidence
-  // is how white flecks arrived on the underside of the lorry.
-  return bestDot > CONFIDENT ? best : -1;
+
+  // The slack has exactly one job: when a slope is as much "up" as it is
+  // "forward", the upright drawing wins, because that is where the artist put
+  // the glass and the grille. Letting it also arbitrate between two upright
+  // directions - which the first version did, by writing the slacker value
+  // back as the best - turned it into a drift towards +Z that disagreed with
+  // the true maximum on 11% of directions, always the same way.
+  if (maxDir === UP || maxDir === DOWN) {
+    let bestUp = -1;
+    let bestUpDot = -Infinity;
+    for (const d of UPRIGHT) {
+      if (dots[d] > bestUpDot) {
+        bestUpDot = dots[d];
+        bestUp = d;
+      }
+    }
+    if (bestUpDot > maxDot - TIE) return bestUp;
+  }
+  return maxDir;
 }

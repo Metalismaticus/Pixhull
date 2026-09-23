@@ -33,8 +33,24 @@ export const DIR_PX = 0, DIR_NX = 1, DIR_PY = 2, DIR_NY = 3, DIR_PZ = 4, DIR_NZ 
 class Chunk {
   constructor() {
     this.solid = new Uint32Array(CHUNK_WORDS);
-    this.faces = new Uint8Array(CHUNK_VOX * 6);
+    /**
+     * Six palette indices per voxel, allocated only when something is painted.
+     *
+     * Most chunks of a solid model are entirely interior: every voxel in them
+     * is buried, none of their faces will ever be seen, and none will ever be
+     * painted. Allocating for them up front cost 175 MB on a 512 lorry to hold
+     * 0.6 MB of real colour. Absent means every face is 0, which is what an
+     * unpainted face reads as anyway.
+     * @type {Uint8Array | null}
+     */
+    this.faces = null;
     this.count = 0;
+  }
+
+  /** @returns {Uint8Array} */
+  paint() {
+    if (!this.faces) this.faces = new Uint8Array(CHUNK_VOX * 6);
+    return this.faces;
   }
 }
 
@@ -111,7 +127,7 @@ export class Volume {
       c.solid[w] &= ~bit;
       c.count--;
       this.solidCount--;
-      c.faces.fill(0, li * 6, li * 6 + 6);
+      if (c.faces) c.faces.fill(0, li * 6, li * 6 + 6);
     }
     this.touch(x, y, z);
   }
@@ -132,7 +148,7 @@ export class Volume {
   getFace(x, y, z, dir) {
     if (!this.inBounds(x, y, z)) return 0;
     const c = this.chunks.get(this.chunkId(x, y, z));
-    if (c === undefined) return 0;
+    if (c === undefined || c.faces === null) return 0;
     return c.faces[Volume.localIndex(x, y, z) * 6 + dir];
   }
 
@@ -141,7 +157,7 @@ export class Volume {
     if (!this.inBounds(x, y, z)) return;
     const c = this.chunks.get(this.chunkId(x, y, z));
     if (c === undefined) return;
-    c.faces[Volume.localIndex(x, y, z) * 6 + dir] = idx;
+    c.paint()[Volume.localIndex(x, y, z) * 6 + dir] = idx;
     this.dirty.add(this.chunkId(x, y, z));
   }
 
@@ -150,7 +166,7 @@ export class Volume {
     if (!this.inBounds(x, y, z)) return;
     const c = this.chunks.get(this.chunkId(x, y, z));
     if (c === undefined) return;
-    c.faces.fill(idx, Volume.localIndex(x, y, z) * 6, Volume.localIndex(x, y, z) * 6 + 6);
+    c.paint().fill(idx, Volume.localIndex(x, y, z) * 6, Volume.localIndex(x, y, z) * 6 + 6);
     this.dirty.add(this.chunkId(x, y, z));
   }
 
@@ -193,7 +209,13 @@ export class Volume {
    * @returns {{buffer: ArrayBuffer, count: number}}
    */
   buildFaceInstances() {
-    let cap = Math.max(1024, this.solidCount * 3);
+    // Guess from the model's *skin*, not its bulk. Three faces per solid voxel
+    // is a fair guess for a sparse shape and a wild one for a solid lorry: at
+    // 512 it asked for a 583 MB buffer to hold 5 MB of faces. A closed surface
+    // inside the grid cannot have more faces than twice each of its three
+    // cross-sections, and `grow` below doubles if a spikier model needs more.
+    const skin = 12 * (this.nx * this.ny + this.ny * this.nz + this.nx * this.nz);
+    let cap = Math.max(1024, Math.min(this.solidCount * 3, skin));
     let buf = new ArrayBuffer(cap * 8);
     let i16 = new Int16Array(buf);
     let u8 = new Uint8Array(buf);
