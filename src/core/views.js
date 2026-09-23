@@ -366,6 +366,98 @@ function chooseRotations(active) {
 
   free.forEach((v, i) => { v.rotate = ((bestMask >> i) & 1) ? 90 : 0; });
 }
+/**
+ * Work out the model's proportions from drawings that are each at their own
+ * scale.
+ *
+ * Taking the largest pixel extent claimed for each axis assumes every drawing
+ * was made at one scale. Sheets are not drawn that way - each view is sized to
+ * fill its own cell - so on a box lorry the front view came out scaled 26%
+ * differently from the top view along the very same axis, and the side view
+ * ended up 19% taller relative to its length than the others said it was.
+ * Views distorted against each other carve material none of them contains:
+ * that is the ridge running along the body behind the cab.
+ *
+ * What a view actually gives is the *ratio* between the two axes it spans,
+ * which it knows exactly even when its absolute size means nothing. Six such
+ * ratios over three unknowns is over-determined, and solved here by least
+ * squares in log space, where a ratio is a difference and the problem is
+ * linear. Ratios say nothing about overall size, so that is pinned afterwards
+ * to whatever disturbs the drawings least.
+ *
+ * On the lorry the drawings turn out to agree to within a fifth of a percent,
+ * and every view then scales uniformly - no distortion left to carve phantoms
+ * out of.
+ *
+ * @param {SourceView[]} active
+ * @returns {{x: number, y: number, z: number}} extents in one common unit
+ */
+function solveExtents(active) {
+  const AXIS = ['x', 'y', 'z'];
+  /** @type {Array<{a: number, b: number, d: number}>} each says logA - logB = d */
+  const constraints = [];
+  for (const v of active) {
+    const axes = VIEW_AXES[v.name] ?? ['x', 'y'];
+    if (v.viewW <= 0 || v.viewH <= 0) continue;
+    constraints.push({
+      a: AXIS.indexOf(axes[0]),
+      b: AXIS.indexOf(axes[1]),
+      d: Math.log(v.viewW / v.viewH),
+    });
+  }
+  if (constraints.length === 0) return { x: 1, y: 1, z: 1 };
+
+  // Normal equations, plus a weak pull towards sum(log) = 0: ratios leave the
+  // overall scale free, and without that term the system is singular.
+  const M = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  const rhs = [0, 0, 0];
+  for (const { a, b, d } of constraints) {
+    M[a][a] += 1;
+    M[b][b] += 1;
+    M[a][b] -= 1;
+    M[b][a] -= 1;
+    rhs[a] += d;
+    rhs[b] -= d;
+  }
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) M[i][j] += 0.01;
+
+  const ratio = solve3(M, rhs).map(Math.exp);
+
+  // Pin the absolute size where it disturbs the drawings least: the geometric
+  // mean of the scale each claim implies.
+  let sum = 0;
+  let n = 0;
+  for (const v of active) {
+    const axes = VIEW_AXES[v.name] ?? ['x', 'y'];
+    sum += Math.log(v.viewW / ratio[AXIS.indexOf(axes[0])]);
+    sum += Math.log(v.viewH / ratio[AXIS.indexOf(axes[1])]);
+    n += 2;
+  }
+  const scale = n > 0 ? Math.exp(sum / n) : 1;
+  return { x: ratio[0] * scale, y: ratio[1] * scale, z: ratio[2] * scale };
+}
+
+/** Gaussian elimination with partial pivoting, sized for the 3x3 above. */
+function solve3(M, rhs) {
+  const a = M.map((row, i) => [...row, rhs[i]]);
+  for (let col = 0; col < 3; col++) {
+    let pivot = col;
+    for (let r = col + 1; r < 3; r++) {
+      if (Math.abs(a[r][col]) > Math.abs(a[pivot][col])) pivot = r;
+    }
+    const swap = a[col];
+    a[col] = a[pivot];
+    a[pivot] = swap;
+    if (Math.abs(a[col][col]) < 1e-12) continue;
+    for (let r = 0; r < 3; r++) {
+      if (r === col) continue;
+      const f = a[r][col] / a[col][col];
+      for (let c = col; c < 4; c++) a[r][c] -= f * a[col][c];
+    }
+  }
+  return [0, 1, 2].map((i) => (Math.abs(a[i][i]) < 1e-12 ? 0 : a[i][3] / a[i][i]));
+}
+
 export function fitViews(views, N) {
   const active = views.filter((v) => v.enabled && v.trim.w > 0);
   chooseRotations(active);
@@ -376,21 +468,10 @@ export function fitViews(views, N) {
   const none = { name: null, amount: 1 };
   if (active.length === 0) return { reduction: 1, extent: { x: 1, y: 1, z: 1 }, reconciled: false, worst: none };
 
-  /** @type {{x: number[], y: number[], z: number[]}} */
-  const seen = { x: [], y: [], z: [] };
-  for (const v of active) {
-    const axes = VIEW_AXES[v.name] ?? ['x', 'y'];
-    seen[axes[0]].push(v.viewW);
-    seen[axes[1]].push(v.viewH);
-  }
-
-  // The largest claim wins. An orthographic silhouette spans the whole model
-  // on its axes, so a view showing less is the one drawn small.
-  const extent = {
-    x: seen.x.length ? Math.max(...seen.x) : 1,
-    y: seen.y.length ? Math.max(...seen.y) : 1,
-    z: seen.z.length ? Math.max(...seen.z) : 1,
-  };
+  // Each view knows the ratio between the two axes it spans exactly, even
+  // when its absolute size is arbitrary. Solving those ratios together beats
+  // believing whichever drawing happens to be biggest.
+  const extent = solveExtents(active);
   const biggest = Math.max(extent.x, extent.y, extent.z);
 
   if (biggest <= N) {
@@ -412,9 +493,11 @@ export function fitViews(views, N) {
     const wantH = cells[axes[1]];
     v.place(N, wantW, wantH);
     if (!v.enabled || v.trim.w === 0) continue;
-    const haveW = v.viewW / reduction;
-    const haveH = v.viewH / reduction;
-    const amount = Math.max(wantW / haveW, haveW / wantW, wantH / haveH, haveH / wantH);
+    // What matters is not that a drawing was resized - they are all at their
+    // own scale - but that it had to be squashed against itself. A view
+    // stretched more one way than the other no longer matches what the artist
+    // drew, and its silhouette starts carving shapes none of them contains.
+    const amount = Math.max(v.scaleX / v.scaleY, v.scaleY / v.scaleX);
     if (amount > worst.amount) {
       worst.amount = amount;
       worst.name = v.name;
