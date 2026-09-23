@@ -267,6 +267,20 @@ function repaintSlopes(vol, raster, N, seen, field, box) {
           // And never from the view staring at this face's back: on a fin one
           // voxel thick the far side would take the near side's colour.
           if ((d ^ 1) === want) continue;
+          // And only where the lattice is standing in for a slope, which means
+          // there is a step above or below this one. A single edge - the top
+          // front edge of a box body, the corner of a bumper - is not a slope
+          // however much the blurred gradient leans, and recolouring it from a
+          // drawing that is not looking at it is what put white corners on the
+          // cab. One step along and one step across lands on the next tread of
+          // a staircase, and on nothing at all at a lone edge.
+          const b = FACE_DIRS[want];
+          let stepped = false;
+          for (let k = 1; k <= 3 && !stepped; k++) {
+            if (at(x + ox - b[0] * k, y + oy - b[1] * k, z + oz - b[2] * k)
+              || at(x - ox + b[0] * k, y - oy + b[1] * k, z - oz + b[2] * k)) stepped = true;
+          }
+          if (!stepped) continue;
           const name = facing[want];
           if (!name) continue;
           const geom = VIEW_GEOM[name];

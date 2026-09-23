@@ -115,10 +115,17 @@ export const FACE_DIRS = [
 ];
 
 /**
- * How strong the blurred gradient has to be before the surface counts as
- * sloped rather than as the edge between two flat faces.
+ * A floor on the blurred gradient, below which it is noise rather than a
+ * direction.
+ *
+ * It used to carry the whole job of telling a slope from the edge between two
+ * flat faces, because both lean the same way and only their strength differs -
+ * a 45-degree plane reads 0.509 at radius 2, a flat face 0.400, a convex edge
+ * 0.339. Setting it high enough to exclude the edge also excluded half the
+ * real slopes, so the caller now asks the lattice directly whether there is a
+ * step above or below, and this is back to being what its name says.
  */
-const SLOPED = 0.36;
+const SLOPED = 0.20;
 
 /** The two vertical face directions, and the four a view draws head-on. */
 const UP = 2;
