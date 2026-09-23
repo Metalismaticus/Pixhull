@@ -14,6 +14,10 @@ import { makeZip, blobBytes } from './export/zip.js';
 import { buildDemoViews } from './demo.js';
 import { t, num, getLang, setLang, applyTranslations } from './i18n.js';
 import { detectTheme, getTheme, setTheme, toggleTheme, cssColorToGl } from './ui/theme.js';
+import { screenRay, raycastVoxel } from './edit/pick.js';
+import { History } from './edit/history.js';
+import { applyTool } from './edit/tools.js';
+import { serializeVolume, deserializeVolume } from './core/serialize.js';
 
 /** @param {string} id */
 const $ = (id) => {
@@ -33,7 +37,18 @@ const state = {
   gridSize: 32,
   /** @type {string | null} slot awaiting a file from the picker */
   pendingSlot: null,
+  /** the viewport needs redrawing */
   dirty: true,
+  /** the instance buffer is stale; coalesced to one rebuild per frame */
+  geometryDirty: false,
+
+  /** @type {'orbit'|'paint'|'fill'|'erase'|'add'|'pick'} */
+  tool: 'orbit',
+  /** palette index the editing tools apply */
+  color: 1,
+  /** cube radius; 0 is a single voxel */
+  brush: 0,
+  history: new History(),
 };
 
 const camera = new OrthoCamera();
@@ -252,7 +267,10 @@ function build() {
   state.volume = volume;
   state.lastStats = stats;
 
+  state.history.clear();
+  refreshHistoryButtons();
   renderer.setPalette(state.palette);
+  refreshPalette();
   const faces = renderer.setVolume(volume);
 
   const box = volume.bounds();
@@ -392,22 +410,174 @@ function zoomBy(delta) {
   state.dirty = true;
 }
 
-function setupOrbit() {
-  let mode = /** @type {null | 'orbit' | 'pan'} */ (null);
+// ----------------------------------------------------------------- editor
+
+const TOOL_BUTTONS = [
+  { id: 'orbit', key: 'tool.orbit', glyph: '⟳', hotkey: 'v' },
+  { id: 'paint', key: 'tool.paint', glyph: '◉', hotkey: 'b' },
+  { id: 'fill', key: 'tool.fill', glyph: '▣', hotkey: 'g' },
+  { id: 'erase', key: 'tool.erase', glyph: '⌫', hotkey: 'e' },
+  { id: 'add', key: 'tool.add', glyph: '⬜', hotkey: 'a' },
+  { id: 'pick', key: 'tool.pick', glyph: '◔', hotkey: 'i' },
+];
+
+function buildToolBar() {
+  const host = $('tool-bar');
+  host.innerHTML = '';
+  for (const tool of TOOL_BUTTONS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.dataset.tool = tool.id;
+    b.title = t(tool.key) + '  (' + tool.hotkey.toUpperCase() + ')';
+    const glyph = document.createElement('span');
+    glyph.className = 'glyph';
+    glyph.textContent = tool.glyph;
+    const label = document.createElement('span');
+    label.textContent = t(tool.key);
+    b.append(glyph, label);
+    b.addEventListener('click', () => setTool(/** @type {any} */ (tool.id)));
+    host.appendChild(b);
+  }
+  markActiveTool();
+}
+
+/** @param {typeof state.tool} tool */
+function setTool(tool) {
+  state.tool = tool;
+  markActiveTool();
+}
+
+function markActiveTool() {
+  for (const b of $('tool-bar').querySelectorAll('button')) {
+    b.classList.toggle('on', /** @type {HTMLElement} */ (b).dataset.tool === state.tool);
+  }
+  canvas.className = state.tool === 'orbit' ? '' : 'tool-' + state.tool;
+}
+
+function refreshPalette() {
+  const host = $('palette-strip');
+  host.innerHTML = '';
+  for (let i = 1; i < state.palette.size; i++) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.style.background = state.palette.hex(i);
+    b.title = state.palette.hex(i);
+    b.classList.toggle('on', i === state.color);
+    b.addEventListener('click', () => {
+      state.color = i;
+      refreshPalette();
+    });
+    host.appendChild(b);
+  }
+  if (state.color >= state.palette.size) state.color = Math.max(1, state.palette.size - 1);
+}
+
+function refreshHistoryButtons() {
+  /** @type {HTMLButtonElement} */ ($('btn-undo')).disabled = !state.history.canUndo;
+  /** @type {HTMLButtonElement} */ ($('btn-redo')).disabled = !state.history.canRedo;
+}
+
+/**
+ * Where a pointer event lands in the model.
+ * @param {PointerEvent} e
+ */
+function hitAt(e) {
+  if (!state.volume) return null;
+  const rect = canvas.getBoundingClientRect();
+  const sx = ((e.clientX - rect.left) / rect.width) * canvas.width;
+  const sy = ((e.clientY - rect.top) / rect.height) * canvas.height;
+  const ray = screenRay(camera, sx, sy, canvas.width, canvas.height);
+  return raycastVoxel(state.volume, ray.origin, ray.dir);
+}
+
+/**
+ * @param {PointerEvent} e
+ * @returns {boolean} true when the model was touched
+ */
+function runToolAt(e) {
+  if (!state.volume || state.tool === 'orbit') return false;
+  const hit = hitAt(e);
+  if (!hit) return false;
+
+  if (state.tool === 'pick') {
+    const picked = state.volume.getFace(hit.x, hit.y, hit.z, hit.face);
+    if (picked) {
+      state.color = picked;
+      refreshPalette();
+    }
+    return true;
+  }
+
+  const result = applyTool(state.volume, hit, {
+    tool: state.tool,
+    color: state.color,
+    brush: state.brush,
+    faceOnly: /** @type {HTMLInputElement} */ ($('face-only')).checked,
+    symmetryX: /** @type {HTMLInputElement} */ ($('symmetry-x')).checked,
+    history: state.history,
+  });
+
+  if (result.changed) {
+    state.geometryDirty = true;
+    state.dirty = true;
+  }
+  return true;
+}
+
+function undo() {
+  if (!state.volume || !state.history.undo(state.volume)) {
+    status('status.nothingToUndo');
+    return;
+  }
+  state.geometryDirty = true;
+  state.dirty = true;
+  refreshHistoryButtons();
+  status('status.undone');
+}
+
+function redo() {
+  if (!state.volume || !state.history.redo(state.volume)) return;
+  state.geometryDirty = true;
+  state.dirty = true;
+  refreshHistoryButtons();
+  status('status.redone');
+}
+
+function setupPointer() {
+  let mode = /** @type {null | 'orbit' | 'pan' | 'tool'} */ (null);
   let lastX = 0;
   let lastY = 0;
 
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
   canvas.addEventListener('pointerdown', (e) => {
-    mode = e.button === 1 || e.shiftKey || e.ctrlKey ? 'pan' : 'orbit';
+    e.preventDefault();
     lastX = e.clientX;
     lastY = e.clientY;
-    canvas.setPointerCapture(e.pointerId);
-    canvas.classList.add('dragging');
-    e.preventDefault();
+    // Capture can be refused for a pointer the browser no longer tracks;
+    // losing it only costs us drags that leave the canvas.
+    try { canvas.setPointerCapture(e.pointerId); } catch { /* not fatal */ }
+
+    // Middle button or Ctrl always pans; Shift and right-drag orbit even while
+    // a paint tool is armed, so the view stays reachable without switching.
+    if (e.button === 1 || e.ctrlKey) mode = 'pan';
+    else if (e.button === 2 || e.shiftKey || state.tool === 'orbit') mode = 'orbit';
+    else mode = 'tool';
+
+    if (mode === 'tool') {
+      state.history.begin();
+      runToolAt(e);
+    } else {
+      canvas.classList.add('dragging');
+    }
   });
 
   canvas.addEventListener('pointermove', (e) => {
     if (!mode) return;
+    if (mode === 'tool') {
+      runToolAt(e);
+      return;
+    }
     const dx = e.clientX - lastX;
     const dy = e.clientY - lastY;
     lastX = e.clientX;
@@ -425,9 +595,15 @@ function setupOrbit() {
   });
 
   const end = (/** @type {PointerEvent} */ e) => {
+    if (mode === 'tool' && state.volume) {
+      // One undo step per stroke, not per voxel.
+      if (state.history.commit(state.volume)) refreshHistoryButtons();
+    }
     mode = null;
     canvas.classList.remove('dragging');
-    if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+    try {
+      if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+    } catch { /* not fatal */ }
   };
   canvas.addEventListener('pointerup', end);
   canvas.addEventListener('pointercancel', end);
@@ -594,7 +770,16 @@ async function saveProject() {
       offsetY: v.offsetY,
     };
   }
-  const project = { format: 'pixhull-project', version: 1, gridSize: state.gridSize, views };
+  // The voxels travel with the project, not just the source views: a rebuild
+  // from the same PNGs cannot reproduce anything carved or painted by hand.
+  const project = {
+    format: 'pixhull-project',
+    version: 2,
+    gridSize: state.gridSize,
+    views,
+    palette: state.palette.serialize(),
+    volume: state.volume ? serializeVolume(state.volume) : null,
+  };
   downloadBlob(new Blob([JSON.stringify(project)], { type: 'application/json' }), 'project.pixhull.json');
   status('status.projectSaved');
 }
@@ -618,7 +803,27 @@ async function loadProject(file) {
     state.gridSize = data.gridSize || 32;
     /** @type {HTMLSelectElement} */ ($('grid-size')).value = String(state.gridSize);
     refreshSlots();
-    build();
+
+    if (data.volume && data.palette) {
+      // Restore the saved voxels rather than re-carving, so hand edits survive.
+      state.palette = Palette.deserialize(data.palette);
+      state.volume = deserializeVolume(data.volume);
+      state.lastStats = { solid: state.volume.solidCount, painted: 0, inferred: 0, mirrored: [], ms: 0 };
+      state.history.clear();
+      refreshHistoryButtons();
+      renderer.setPalette(state.palette);
+      refreshPalette();
+      const faces = renderer.setVolume(state.volume);
+      const box = state.volume.bounds();
+      if (box) camera.fit(box, canvas.width || 800, canvas.height || 600);
+      $('viewport-empty').classList.toggle('hidden', state.volume.solidCount > 0);
+      updateStats(state.lastStats, faces);
+      updateZoomLabel();
+      updateFramePreview();
+      state.dirty = true;
+    } else {
+      build();
+    }
     status('status.projectLoaded');
   } catch (err) {
     status('status.projectFailed', { err: String(err instanceof Error ? err.message : err) }, 'error');
@@ -644,6 +849,16 @@ function nextFrame() {
 function frame() {
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   if (renderer.resize(dpr)) state.dirty = true;
+  if (state.geometryDirty && state.volume) {
+    // Dragging a brush can touch the model dozens of times per frame; rebuild
+    // the instance buffer once instead of once per event.
+    const faces = renderer.setVolume(state.volume);
+    // Editing changes the voxel count, so the carve-time figure is stale.
+    if (state.lastStats) state.lastStats.solid = state.volume.solidCount;
+    updateStats(state.lastStats, faces);
+    state.geometryDirty = false;
+    state.dirty = true;
+  }
   if (state.dirty) {
     renderer.render(camera, { showBounds: /** @type {HTMLInputElement} */ ($('bounds-toggle')).checked });
     state.dirty = false;
@@ -690,6 +905,7 @@ function retranslate() {
   applyTranslations();
   buildPitchPresets();
   buildAngleChips();
+  buildToolBar();
   refreshSlots();
   refreshLanguageButton();
   renderStatus();
@@ -705,11 +921,35 @@ function init() {
 
   buildSlots();
   buildAngleChips();
+  buildToolBar();
   buildPitchPresets();
   wirePitchPresets();
-  setupOrbit();
+  setupPointer();
   applyTranslations();
   refreshLanguageButton();
+
+  const brush = /** @type {HTMLInputElement} */ ($('brush-size'));
+  brush.addEventListener('input', () => {
+    state.brush = +brush.value;
+    const side = state.brush * 2 + 1;
+    $('brush-label').textContent = side + '³';
+  });
+
+  $('btn-undo').addEventListener('click', undo);
+  $('btn-redo').addEventListener('click', redo);
+
+  $('btn-add-color').addEventListener('click', () => {
+    const hex = /** @type {HTMLInputElement} */ ($('new-color')).value;
+    const n = parseInt(hex.slice(1), 16);
+    const before = state.palette.size;
+    const idx = state.palette.add((n >> 16) & 255, (n >> 8) & 255, n & 255);
+    state.color = idx;
+    renderer.setPalette(state.palette);
+    refreshPalette();
+    state.dirty = true;
+    if (state.palette.size === before && state.palette.overflowed) status('status.paletteFull', undefined, 'warn');
+    else status('status.colorAdded', { n: state.palette.size - 1 });
+  });
 
   $('btn-theme').addEventListener('click', () => {
     toggleTheme();
@@ -791,12 +1031,24 @@ function init() {
 
   window.addEventListener('keydown', (e) => {
     if (/** @type {HTMLElement} */ (e.target).matches('input, select, textarea')) return;
+
+    if (e.ctrlKey || e.metaKey) {
+      const k = e.key.toLowerCase();
+      if (k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
+      else if ((k === 'z' && e.shiftKey) || k === 'y') { e.preventDefault(); redo(); }
+      return;
+    }
+
     const idx = '12345'.indexOf(e.key);
     if (idx >= 0) {
       camera.yaw = ANGLE_CHIPS[idx].yaw * DEG;
       state.dirty = true;
       markActiveChip();
+      return;
     }
+
+    const tool = TOOL_BUTTONS.find((b) => b.hotkey === e.key.toLowerCase());
+    if (tool) setTool(/** @type {any} */ (tool.id));
   });
 
   updateFramePreview();

@@ -66,6 +66,35 @@
     </div>
 
     <button id="btn-build" class="primary" type="button" data-i18n="grid.build"></button>
+
+    <h2 data-i18n="edit.heading"></h2>
+    <div class="toolbar" id="tool-bar"></div>
+
+    <div class="field">
+      <label for="brush-size" data-i18n="edit.brush"></label>
+      <input type="range" id="brush-size" min="0" max="4" step="1" value="0">
+      <span class="unit" id="brush-label">1³</span>
+    </div>
+    <div class="field checkbox">
+      <input type="checkbox" id="face-only" checked>
+      <label for="face-only" data-i18n="edit.faceOnly"></label>
+    </div>
+    <div class="field checkbox">
+      <input type="checkbox" id="symmetry-x">
+      <label for="symmetry-x" data-i18n="edit.symmetryX"></label>
+    </div>
+
+    <div class="palette-strip" id="palette-strip"></div>
+    <div class="field">
+      <input type="color" id="new-color" value="#ff8844" data-i18n-title="edit.newColor">
+      <button id="btn-add-color" class="ghost small" type="button" data-i18n="edit.addColor"></button>
+    </div>
+
+    <div class="field history-row">
+      <button id="btn-undo" class="ghost small" type="button" data-i18n="edit.undo" disabled></button>
+      <button id="btn-redo" class="ghost small" type="button" data-i18n="edit.redo" disabled></button>
+    </div>
+    <p class="hint" data-i18n="edit.hint"></p>
   </aside>
 
   <!-- ------------------------------------------------------------------ -->

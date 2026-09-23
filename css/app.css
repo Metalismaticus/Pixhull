@@ -419,3 +419,77 @@ button.linkish {
   .panel-right { border-left: none; border-top: 1px solid var(--line); }
   body { overflow: auto; }
 }
+
+/* ------------------------------------------------------------------ editor */
+
+.toolbar {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+
+.toolbar button {
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+  padding: 6px 4px;
+  font-size: 11px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  line-height: 1.2;
+}
+.toolbar button:hover { color: var(--text); border-color: var(--accent-dim); }
+.toolbar button.on {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.toolbar .glyph { font-size: 14px; line-height: 1; }
+
+.palette-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  min-height: 20px;
+}
+
+.palette-strip button {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 3px;
+  border: 1px solid var(--line);
+  cursor: pointer;
+}
+.palette-strip button:hover { transform: scale(1.12); }
+.palette-strip button.on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--bg-panel), 0 0 0 3px var(--accent);
+}
+
+input[type="color"] {
+  flex: 0 0 32px;
+  height: 26px;
+  padding: 2px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.history-row { gap: 4px; }
+.history-row button { flex: 1 1 0; }
+
+input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
+/* The cursor tells you which tool is armed before you click. */
+#gl.tool-paint, #gl.tool-fill, #gl.tool-add { cursor: crosshair; }
+#gl.tool-erase { cursor: cell; }
+#gl.tool-pick { cursor: copy; }

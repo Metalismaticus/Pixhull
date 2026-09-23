@@ -88,6 +88,22 @@ Both themes follow the system preference on first load and are remembered after
 that. The UI switches between English and Russian from the top bar, including
 numbers, which pick up the locale's separators.
 
+### Editing, because the method needs it
+
+A visual hull cannot represent a concavity no silhouette reveals, so hand
+editing is not a convenience bolted on afterwards - it is the other half of the
+method. Paint a face or a whole voxel, bucket-fill across a surface (following
+staircases, not stopping at the edge of a plane), erase, add, and pick a colour
+off the model. Brush up to 9³, optional mirroring across X, and undo/redo where
+**one stroke is one step** rather than one voxel.
+
+Every operation that can expose a new face colours it, because an uncoloured
+face is discarded by the shader and becomes a hole.
+
+Projects save the voxels, not just the source views - re-carving from the same
+PNGs could never reproduce something carved by hand. Two run-length streams get
+the demo from 94 KiB raw to 5.8 KiB, and the round-trip is bit-exact.
+
 ### Any image size
 
 Views do not have to be square, do not have to match each other, and do not
@@ -124,6 +140,10 @@ Pages serves; there is nothing to build, so the repository root is the site.
 | [`src/gfx/renderer.js`](src/gfx/renderer.js) | Instanced face renderer — one draw call for the whole model |
 | [`src/export/sprite.js`](src/export/sprite.js) | Turnaround rendering, sheet packing, palette snapping |
 | [`src/export/obj.js`](src/export/obj.js) | OBJ + MTL with greedy face merging (~90% fewer quads on the demo) |
+| [`src/edit/pick.js`](src/edit/pick.js) | Screen ray and grid walk — a click to a voxel and a face |
+| [`src/edit/tools.js`](src/edit/tools.js) | Paint, fill, erase, add, symmetry, and face healing |
+| [`src/edit/history.js`](src/edit/history.js) | Undo/redo, one step per stroke, storing only touched voxels |
+| [`src/core/serialize.js`](src/core/serialize.js) | Run-length project format so hand edits survive a save |
 
 ### Known limits of the approach
 
@@ -131,14 +151,16 @@ A visual hull cannot represent a concavity that no silhouette reveals — the
 inside of a hood, a dimple, a blind hole. Those come out filled. Two unrelated
 shapes in different views also generate phantom volume where their projections
 cross. Both are inherent to shape-from-silhouette, not bugs, and both are why
-in-app editing is on the roadmap rather than optional.
+the editor exists rather than being optional.
 
 ---
 
 ## Roadmap
 
-- [ ] Voxel painting and erasing in the 3D view, with undo/redo
-- [ ] Mirror/symmetry modes, selections, layers and separate parts
+- [x] Voxel painting, filling, adding and erasing in the 3D view, with undo/redo
+- [x] Mirror editing across X
+- [ ] Selections, layers and separate parts
+- [ ] Rebuild only the chunks an edit dirtied, instead of the whole instance buffer
 - [ ] Per-view depth map input, to recover concavities the hull cannot
 - [ ] Animation: parts with pivots, wheel spin, sprite sheets per animation
 - [ ] `.vox` and PNG slice export (sprite stacking)

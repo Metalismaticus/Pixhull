@@ -26,11 +26,17 @@ const OPPOSITE = {
 };
 
 /**
- * How an opposite view's (u, v) relates to this one's. Front/back and
- * left/right are horizontal mirrors of each other; top/bottom is a vertical one.
+ * How an opposite view's (u, v) relates to this one's - both horizontal pairs
+ * are plain mirrors.
+ *
+ * Top and bottom are deliberately absent. A model's underside is not its roof
+ * flipped over: mirroring a car's top view paints the bodywork's red onto the
+ * undersides of its tyres, and a character's hair onto the soles of its feet.
+ * The underside is better served by the nearest-real-colour spread below, and
+ * it is the facing least often seen anyway.
  */
 const MIRROR_AXIS = {
-  front: 'h', back: 'h', right: 'h', left: 'h', top: 'v', bottom: 'v',
+  front: 'h', back: 'h', right: 'h', left: 'h',
 };
 
 /**
@@ -101,7 +107,7 @@ export function carve(views, N, palette, opts = {}) {
   const mirrored = [];
   if (opts.mirrorMissing !== false) {
     for (const name of VIEW_NAMES) {
-      if (raster[name]) continue;
+      if (raster[name] || !MIRROR_AXIS[name]) continue;
       const src = raster[OPPOSITE[name]];
       if (!src) continue;
       raster[name] = mirrorRaster(src, N, MIRROR_AXIS[name]);
@@ -195,57 +201,66 @@ function paintFromViews(vol, raster, N) {
  * @returns {number} faces filled in this way
  */
 function inferMissingFaces(vol, fallback = 1) {
-  let inferred = 0;
-  /** @type {Array<[number, number, number, number]>} still bare: x,y,z,dir */
-  let bare = [];
+  const nx = vol.nx;
+  const ny = vol.ny;
+  const index = (x, y, z) => x + nx * (y + ny * z);
+
+  // Only surface voxels matter - the interior has no faces to colour, and
+  // leaving it out keeps this proportional to the model's skin rather than its
+  // volume.
+  /** @type {Map<number, number>} surface voxel -> representative colour, 0 = still unknown */
+  const own = new Map();
 
   vol.forEachSolid((x, y, z) => {
-    let own = 0;
+    let exposed = false;
+    let seen = 0;
     for (let d = 0; d < 6; d++) {
+      const [dx, dy, dz] = DIRS[d];
+      if (!vol.get(x + dx, y + dy, z + dz)) exposed = true;
       const c = vol.getFace(x, y, z, d);
-      if (c !== 0) { own = c; break; }
+      if (c !== 0 && seen === 0) seen = c;
     }
+    if (exposed) own.set(index(x, y, z), seen);
+  });
+
+  // Breadth-first from every voxel a view actually reached, so an uncoloured
+  // patch takes the colour of the *nearest* real one. This is what keeps the
+  // inward-facing side of a wheel black: the tyre beside it is two voxels away
+  // and the bodywork above it is three, so the tyre wins. Picking any adjacent
+  // colour, as a simple flood does, would hand it whatever happened to be next
+  // to it - usually the large panel above.
+  const queue = [];
+  for (const [i, c] of own) if (c !== 0) queue.push(i);
+
+  for (let head = 0; head < queue.length; head++) {
+    const i = queue[head];
+    const c = /** @type {number} */ (own.get(i));
+    const x = i % nx;
+    const y = ((i / nx) | 0) % ny;
+    const z = (i / (nx * ny)) | 0;
+    for (let d = 0; d < 6; d++) {
+      const [dx, dy, dz] = DIRS[d];
+      const ax = x + dx, ay = y + dy, az = z + dz;
+      if (!vol.inBounds(ax, ay, az)) continue;
+      const ni = index(ax, ay, az);
+      // Anything but 0 means "not a surface voxel" or "already assigned".
+      if (own.get(ni) !== 0) continue;
+      own.set(ni, c);
+      queue.push(ni);
+    }
+  }
+
+  let inferred = 0;
+  vol.forEachSolid((x, y, z) => {
+    const c = own.get(index(x, y, z)) || fallback;
     for (let d = 0; d < 6; d++) {
       const [dx, dy, dz] = DIRS[d];
       if (vol.get(x + dx, y + dy, z + dz)) continue;
       if (vol.getFace(x, y, z, d) !== 0) continue;
-      if (own !== 0) {
-        vol.setFace(x, y, z, d, own);
-        inferred++;
-      } else {
-        bare.push([x, y, z, d]);
-      }
+      vol.setFace(x, y, z, d, c);
+      inferred++;
     }
   });
-
-  // Voxels no view could see at all: flood colour in from their neighbours.
-  for (let pass = 0; pass < 8 && bare.length > 0; pass++) {
-    /** @type {typeof bare} */
-    const still = [];
-    for (const [x, y, z, d] of bare) {
-      let c = 0;
-      for (let nd = 0; nd < 6 && c === 0; nd++) {
-        const [dx, dy, dz] = DIRS[nd];
-        if (!vol.get(x + dx, y + dy, z + dz)) continue;
-        c = vol.getFace(x + dx, y + dy, z + dz, d);
-      }
-      if (c !== 0) {
-        vol.setFace(x, y, z, d, c);
-        inferred++;
-      } else {
-        still.push([x, y, z, d]);
-      }
-    }
-    if (still.length === bare.length) break;
-    bare = still;
-  }
-
-  // Anything the flood could not reach - typically a whole facing that no view
-  // covers, such as the underside when only front/side/top were supplied.
-  for (const [x, y, z, d] of bare) {
-    vol.setFace(x, y, z, d, fallback);
-    inferred++;
-  }
 
   return inferred;
 }
