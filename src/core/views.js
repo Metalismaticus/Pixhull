@@ -16,7 +16,7 @@
 
 import { DIR_PX, DIR_NX, DIR_PY, DIR_NY, DIR_PZ, DIR_NZ } from './volume.js';
 
-import { alignViews } from './align.js';
+import { alignViews, IMAGE_AXES } from './align.js';
 
 /** Order matters: it is the UI order and the serialisation order. */
 export const VIEW_NAMES = /** @type {const} */ (['front', 'back', 'right', 'left', 'top', 'bottom']);
@@ -68,6 +68,14 @@ export class SourceView {
     /** Top-left corner of the placed content, in grid cells; may be fractional. */
     this.offsetX = 0;
     this.offsetY = 0;
+    /**
+     * Grid cells this view is allowed to fill, as {u0, u1, v0, v1} inclusive.
+     *
+     * Set by fitViews when the drawings contradict each other about how far a
+     * thin part sticks out; null the rest of the time. See `clipContestedSpikes`.
+     * @type {{u0: number, u1: number, v0: number, v1: number} | null}
+     */
+    this.clip = null;
     /** Set by autoPlace; kept so the UI can show "trimmed to 37x52". */
     this.trim = { x: 0, y: 0, w: image.width, h: image.height };
     this.computeTrim();
@@ -131,6 +139,7 @@ export class SourceView {
    * @param {number} [scale] source pixels per grid cell
    */
   autoPlace(N, scale = 1) {
+    this.clip = null;
     if (this.trim.w === 0) {
       this.scaleX = 1;
       this.scaleY = 1;
@@ -161,6 +170,7 @@ export class SourceView {
    * @param {number} gh height in grid cells
    */
   place(N, gw, gh) {
+    this.clip = null;
     if (this.trim.w === 0 || gw <= 0 || gh <= 0) {
       this.scaleX = 1;
       this.scaleY = 1;
@@ -198,13 +208,16 @@ export class SourceView {
     const viewH = this.viewH;
     /** @type {Map<number, number>} packed colour -> pixels in this cell */
     const tally = new Map();
+    const clip = this.clip;
 
     for (let v = 0; v < N; v++) {
+      if (clip && (v < clip.v0 || v > clip.v1)) continue;
       const b0 = Math.floor((v - this.offsetY) * sy);
       const b1 = Math.max(b0 + 1, Math.ceil((v + 1 - this.offsetY) * sy));
       if (b1 <= 0 || b0 >= viewH) continue;
 
       for (let u = 0; u < N; u++) {
+        if (clip && (u < clip.u0 || u > clip.u1)) continue;
         const a0 = Math.floor((u - this.offsetX) * sx);
         const a1 = Math.max(a0 + 1, Math.ceil((u + 1 - this.offsetX) * sx));
         if (a1 <= 0 || a0 >= viewW) continue;
@@ -458,6 +471,151 @@ function solve3(M, rhs) {
   return [0, 1, 2].map((i) => (Math.abs(a[i][i]) < 1e-12 ? 0 : a[i][3] / a[i][i]));
 }
 
+/**
+ * A spike has to reach at least this far in from the edge, as a fraction of
+ * the drawing's extent, before it is worth arguing about. Below it the views
+ * are quibbling over a bumper, and trimming costs more than it saves.
+ */
+const SPIKE_MIN = 0.05;
+
+/** Occupancy of the oriented drawing along each of its own axes, in its own pixels. */
+function marginals(view) {
+  const W = view.viewW;
+  const H = view.viewH;
+  const u = new Float64Array(W);
+  const v = new Float64Array(H);
+  const { data, width: iw } = view.image;
+  for (let b = 0; b < H; b++) {
+    for (let a = 0; a < W; a++) {
+      const [px, py] = view.toSource(a, b);
+      if (data[(py * iw + px) * 4 + 3] < ALPHA_THRESHOLD) continue;
+      u[a]++;
+      v[b]++;
+    }
+  }
+  return { u, v };
+}
+
+/**
+ * How far a thin spike runs in from each end of an occupancy profile.
+ *
+ * A wing mirror seen head-on is a few pixels of lorry hanging off the side:
+ * the profile sits at a fifth of its usual value for thirty columns and then
+ * steps back up to the body in a single column. That *step* is what is looked
+ * for - a run that stays thin and ends abruptly - rather than "anything below
+ * a threshold", which also eats the bottom of a wheel, where the profile
+ * tapers away instead of stepping.
+ *
+ * @param {Float64Array} m
+ * @returns {{lo: number, hi: number}} depth in pixels at each end
+ */
+function spikeDepth(m) {
+  const sorted = [...m].filter((x) => x > 0).sort((a, b) => a - b);
+  if (sorted.length === 0) return { lo: 0, hi: 0 };
+  const median = sorted[sorted.length >> 1] || 1;
+  const reach = Math.floor(m.length * 0.35);
+  const from = (start, step) => {
+    let deepest = 0;
+    for (let k = 1; k <= reach; k++) {
+      const i = start + step * k;
+      if (m[i] > m[i - step] * 2 && m[i - step] < median * 0.45) deepest = k;
+    }
+    return deepest;
+  };
+  return { lo: from(0, 1), hi: from(m.length - 1, -1) };
+}
+
+/**
+ * Stop one drawing's spike from being smeared down the length of the model.
+ *
+ * A lorry's wing mirrors stand 25% proud of the body seen head-on. Seen from
+ * above, the artist drew them flush - the box body and the mirrors end at the
+ * same line. Both drawings cannot be right, and fitting them by their bounding
+ * boxes quietly picks the wrong one: the mirrors are made to coincide, so the
+ * body in the top view is stretched out to the mirrors' width, and every voxel
+ * between the body and the mirror line is then vouched for by both drawings.
+ * The result is a rail eight voxels tall running the whole length of the body
+ * at mirror height. It is not a phantom of the method - it is one drawing's
+ * mirror stretched into a girder.
+ *
+ * The contradiction is detectable: the front view separates the spike from the
+ * body with a clean step, the top view has no step to separate. Where they
+ * disagree like that, the drawing that resolves the spike is believed, and the
+ * model is cut back to the body it describes. The spike itself goes with it -
+ * nothing that can be trusted says how far out it really stands - but a lorry
+ * without mirrors beats a lorry with a girder.
+ *
+ * Nothing happens when the drawings agree, which is the usual case: an aerial
+ * drawn as a spike in every view is a spike in all of them, and is kept.
+ *
+ * @param {SourceView[]} active
+ * @param {number} N
+ * @param {{x: number, y: number, z: number}} cells extent of the model in grid cells
+ * @returns {Array<{axis: string, amount: number}>} what was cut back, worst first
+ */
+function clipContestedSpikes(active, N, cells) {
+  /** @type {Record<string, {min: number[], max: number[]}>} */
+  const claims = {};
+  for (const view of active) {
+    const m = marginals(view);
+    for (const which of /** @type {const} */ (['u', 'v'])) {
+      const [axis, sign] = IMAGE_AXES[view.name]?.[which] ?? [];
+      if (!axis) continue;
+      const d = spikeDepth(m[which]);
+      const len = m[which].length || 1;
+      claims[axis] ??= { min: [], max: [] };
+      // Image-low is model-low only when the axis runs with the image.
+      claims[axis].min.push((sign > 0 ? d.lo : d.hi) / len);
+      claims[axis].max.push((sign > 0 ? d.hi : d.lo) / len);
+    }
+  }
+
+  /** @type {Record<string, [number, number]>} fraction cut from each end */
+  const cut = { x: [0, 0], y: [0, 0], z: [0, 0] };
+  const report = [];
+  for (const axis of /** @type {const} */ (['x', 'y', 'z'])) {
+    const claim = claims[axis];
+    if (!claim) continue;
+    for (const [i, end] of /** @type {const} */ ([[0, 'min'], [1, 'max']])) {
+      const depths = claim[end];
+      if (depths.length < 2) continue;
+      const deepest = Math.max(...depths);
+      const shallowest = Math.min(...depths);
+      // Agreement - even agreement that there is no spike - is left alone.
+      if (deepest < SPIKE_MIN || shallowest >= deepest / 2) continue;
+      cut[axis][i] = deepest;
+      report.push({ axis, amount: deepest });
+    }
+  }
+  if (report.length === 0) return [];
+
+  // Turn the fractions into the band of grid cells the model may still fill,
+  // then hand each view the band in its own image coordinates.
+  /** @type {Record<string, [number, number]>} */
+  const band = {};
+  for (const axis of /** @type {const} */ (['x', 'y', 'z'])) {
+    const size = cells[axis];
+    const start = (N - size) / 2;
+    band[axis] = [
+      Math.ceil(start + cut[axis][0] * size),
+      Math.floor(start + size - 1 - cut[axis][1] * size),
+    ];
+  }
+  for (const view of active) {
+    const axes = IMAGE_AXES[view.name];
+    if (!axes) continue;
+    /** @type {Record<string, [number, number]>} */
+    const own = {};
+    for (const which of /** @type {const} */ (['u', 'v'])) {
+      const [axis, sign] = axes[which];
+      const [lo, hi] = band[axis];
+      own[which] = sign > 0 ? [lo, hi] : [N - 1 - hi, N - 1 - lo];
+    }
+    view.clip = { u0: own.u[0], u1: own.u[1], v0: own.v[0], v1: own.v[1] };
+  }
+  return report.sort((a, b) => b.amount - a.amount);
+}
+
 export function fitViews(views, N) {
   const active = views.filter((v) => v.enabled && v.trim.w > 0);
   chooseRotations(active);
@@ -466,7 +624,7 @@ export function fitViews(views, N) {
   alignViews(active);
 
   const none = { name: null, amount: 1 };
-  if (active.length === 0) return { reduction: 1, extent: { x: 1, y: 1, z: 1 }, reconciled: false, worst: none };
+  if (active.length === 0) return { reduction: 1, extent: { x: 1, y: 1, z: 1 }, reconciled: false, worst: none, trimmed: [] };
 
   // Each view knows the ratio between the two axes it spans exactly, even
   // when its absolute size is arbitrary. Solving those ratios together beats
@@ -476,7 +634,7 @@ export function fitViews(views, N) {
 
   if (biggest <= N) {
     for (const v of views) v.autoPlace(N, 1);
-    return { reduction: 1, extent, reconciled: false, worst: none };
+    return { reduction: 1, extent, reconciled: false, worst: none, trimmed: [] };
   }
 
   const reduction = biggest / N;
@@ -503,5 +661,6 @@ export function fitViews(views, N) {
       worst.name = v.name;
     }
   }
-  return { reduction, extent, reconciled: true, worst };
+  const trimmed = clipContestedSpikes(active, N, cells);
+  return { reduction, extent, reconciled: true, worst, trimmed };
 }

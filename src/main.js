@@ -43,6 +43,8 @@ const state = {
   fitScale: 1,
   /** @type {{name: string|null, amount: number}} the view that agreed least with the rest */
   worstFit: { name: null, amount: 1 },
+  /** @type {Array<{axis: string, amount: number}>} axes cut back over a contested spike */
+  trimmed: [],
   gridSize: 32,
   /** @type {string | null} slot awaiting a file from the picker */
   pendingSlot: null,
@@ -284,6 +286,7 @@ function build() {
   const fit = fitViews(views, N);
   state.fitScale = fit.reduction;
   state.worstFit = fit.worst;
+  state.trimmed = fit.trimmed ?? [];
 
   const mirrorMissing = /** @type {HTMLInputElement} */ ($('mirror-toggle')).checked;
   const { volume, stats } = carve(views, N, state.palette, { mirrorMissing });
@@ -327,6 +330,12 @@ function build() {
       n: volume.solidCount,
       view: ['views.' + state.worstFit.name],
       amount: state.worstFit.amount.toFixed(2),
+    }, 'warn');
+  } else if (state.trimmed.length > 0) {
+    status('status.spikeTrimmed', {
+      n: volume.solidCount,
+      axis: ['axis.' + state.trimmed[0].axis],
+      pct: Math.round(state.trimmed[0].amount * 100),
     }, 'warn');
   } else if (state.palette.overflowed) {
     status('status.paletteOverflow', { ms: stats.ms.toFixed(0) }, 'warn');
