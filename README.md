@@ -89,8 +89,8 @@ Then open <http://localhost:5173>. No `npm install` — there are no dependencie
 
 ## Deploy
 
-Push to `main`. The included workflow publishes the repository root to GitHub
-Pages as-is; there is nothing to build.
+Push to `main`. The included workflow mirrors it to `gh-pages`, which is what
+Pages serves; there is nothing to build, so the repository root is the site.
 
 ---
 
