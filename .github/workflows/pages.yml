@@ -28,6 +28,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # A shallow clone cannot push to an existing branch - the remote
+          # rejects it with "shallow update not allowed" because it cannot
+          # verify the fast-forward.
+          fetch-depth: 0
 
       - name: Check every module parses
         run: |
