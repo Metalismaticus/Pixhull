@@ -3,7 +3,8 @@
 Turn front / side / top pixel art into a 3D voxel model, then export
 pixel-perfect sprite turnarounds and OBJ models.
 
-**[Open it &rarr;](https://metalismaticus.github.io/Pixhull/)**
+**[Open it &rarr;](https://metalismaticus.github.io/Pixhull/)** &nbsp;·&nbsp;
+[Инструкция на русском](README.ru.md)
 
 Runs entirely in the browser. No install, no account, no server, no build step.
 Free and open source.
