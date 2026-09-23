@@ -4,3 +4,4 @@ dist/
 Thumbs.db
 *.log
 .claude/settings.local.json
+_tmp-*

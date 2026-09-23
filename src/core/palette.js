@@ -38,7 +38,13 @@ export class Palette {
     if (hit !== undefined) return hit;
     if (this.colors.length >= PALETTE_MAX) {
       this.overflowed = true;
-      return this.nearest(r, g, b);
+      // Cache the answer. Without this, art with thousands of anti-aliased
+      // colours pays a 255-entry search for every *pixel* rather than for every
+      // distinct colour, which is the difference between milliseconds and
+      // seconds on a detailed reference sheet.
+      const nearest = this.nearest(r, g, b);
+      this.lookup.set(key, nearest);
+      return nearest;
     }
     const i = this.colors.length;
     this.colors.push(key);

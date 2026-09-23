@@ -174,6 +174,27 @@ faces of different colours, and averaging them would smear the palette across
 exactly the edges the art depends on. `KHR_materials_unlit` is declared as used
 but not required, so a viewer that knows it shows the palette exactly and one
 that does not still looks right.
+### Art bigger than the grid is reduced, not cropped
+
+A reference sheet drawn at 450 pixels across is not pixel art at voxel scale,
+and it has to be brought down to the grid. Each grid cell takes a box of
+source pixels: solid when most of that box is, coloured by the box’s most
+common colour. Point sampling would be cheaper and wrong twice over — it drops
+thin structures like a wing edge, and it picks up anti-aliasing fringes that
+belong to neither side of an outline.
+
+Reducing also reconciles the views against each other. Hand-drawn sheets
+routinely disagree about an axis two views share — a side view drawn 18%
+shorter than the front view says it is. Since an orthographic silhouette spans
+the model’s full extent on both its axes by definition, fitting every view to
+the agreed extent is the correction rather than a fudge, and the status bar
+names whichever view had to be stretched most.
+
+Art that already fits the grid is left strictly alone, at one art pixel per
+voxel on whole-cell offsets. Resampling a 12-pixel wing to 13 cells would add
+a column the artist never drew. Verified both ways: the demo is unchanged at
+1,438 voxels, and consistent art upscaled 8× or 37× then reduced back carves
+the identical model.
 ### Any image size
 
 Views do not have to be square, do not have to match each other, and do not

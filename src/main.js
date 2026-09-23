@@ -4,7 +4,7 @@
  */
 
 import { Palette } from './core/palette.js';
-import { SourceView, VIEW_NAMES, suggestGridSize } from './core/views.js';
+import { SourceView, VIEW_NAMES, suggestGridSize, fitViews } from './core/views.js';
 import { decodeImage, toImageData } from './ui/decode.js';
 import { carve } from './core/carve.js';
 import { detectCells, cropCell, guessViews } from './core/sheet.js';
@@ -39,6 +39,10 @@ const state = {
   volume: null,
   /** @type {import('./core/carve.js').CarveStats | null} */
   lastStats: null,
+  /** Source pixels per grid cell in the last build; 1 means art was used 1:1. */
+  fitScale: 1,
+  /** @type {{name: string|null, amount: number}} the view that agreed least with the rest */
+  worstFit: { name: null, amount: 1 },
   gridSize: 32,
   /** @type {string | null} slot awaiting a file from the picker */
   pendingSlot: null,
@@ -265,7 +269,11 @@ function build() {
 
   const N = state.gridSize;
   state.palette = new Palette();
-  for (const v of views) v.autoPlace(N);
+  // Art larger than the grid is reduced, not cropped, and the views are
+  // reconciled against each other before it happens.
+  const fit = fitViews(views, N);
+  state.fitScale = fit.reduction;
+  state.worstFit = fit.worst;
 
   const mirrorMissing = /** @type {HTMLInputElement} */ ($('mirror-toggle')).checked;
   const { volume, stats } = carve(views, N, state.palette, { mirrorMissing });
@@ -291,6 +299,12 @@ function build() {
     status('status.emptyCarve', undefined, 'warn');
   } else if (state.palette.overflowed) {
     status('status.paletteOverflow', { ms: stats.ms.toFixed(0) }, 'warn');
+  } else if (state.worstFit.amount > 1.1 && state.worstFit.name) {
+    status('status.viewsDisagree', {
+      n: volume.solidCount,
+      view: ['views.' + state.worstFit.name],
+      amount: state.worstFit.amount.toFixed(2),
+    }, 'warn');
   } else if (stats.mirrored.length > 0) {
     status('status.builtMirrored', {
       n: volume.solidCount,
@@ -330,6 +344,7 @@ function updateStats(stats, faces) {
     ['stats.inferred', num(stats.inferred)],
   ];
   if (stats.mirrored.length > 0) rows.push(['stats.mirrored', String(stats.mirrored.length)]);
+  if (state.fitScale > 1.001) rows.push(['stats.reduction', state.fitScale.toFixed(2) + '×']);
 
   for (const [key, value] of rows) {
     const row = document.createElement('div');

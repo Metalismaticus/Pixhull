@@ -108,9 +108,11 @@ const STRINGS = {
     'stats.palette': 'palette',
     'stats.inferred': 'inferred faces',
     'stats.mirrored': 'mirrored views',
+    'stats.reduction': 'art reduced',
 
     'status.ready': 'ready',
     'status.built': 'Built {n} voxels in {ms} ms',
+    'status.viewsDisagree': 'Built {n} voxels — the {view} view had to be stretched {amount}× to agree with the others. The drawings do not share their axes, so the shape is approximate.',
     'status.builtMirrored': 'Built {n} voxels in {ms} ms · mirrored: {views}',
     'status.emptyCarve': 'Carved nothing — the views may not overlap. Try flipping a view, or check the alpha channel.',
     'status.paletteOverflow': 'Built in {ms} ms — art has more than 255 colours, extras were snapped to the nearest.',
@@ -290,9 +292,11 @@ const STRINGS = {
     'stats.palette': 'палитра',
     'stats.inferred': 'достроенных граней',
     'stats.mirrored': 'зеркальных видов',
+    'stats.reduction': 'арт уменьшен',
 
     'status.ready': 'готов',
     'status.built': 'Собрано {n} вокселей за {ms} мс',
+    'status.viewsDisagree': 'Собрано {n} вокселей — вид «{view}» пришлось растянуть в {amount}×, чтобы он сошёлся с остальными. Рисунки не согласованы по осям, так что форма приблизительная.',
     'status.builtMirrored': 'Собрано {n} вокселей за {ms} мс · отзеркалено: {views}',
     'status.emptyCarve': 'Ничего не вырезалось — виды могут не пересекаться. Попробуйте отразить вид или проверьте альфа-канал.',
     'status.paletteOverflow': 'Собрано за {ms} мс — в арте больше 255 цветов, лишние примагничены к ближайшим.',

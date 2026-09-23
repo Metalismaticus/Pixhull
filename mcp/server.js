@@ -27,7 +27,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 
 import { Palette } from '../src/core/palette.js';
-import { SourceView, VIEW_NAMES } from '../src/core/views.js';
+import { SourceView, VIEW_NAMES, fitViews } from '../src/core/views.js';
 import { carve } from '../src/core/carve.js';
 import { exportObj } from '../src/export/obj.js';
 import { exportVox } from '../src/export/vox.js';
@@ -164,7 +164,7 @@ function toolCarveViews(args) {
     for (const v of views) grid = Math.max(grid, v.trim.w, v.trim.h);
     grid = Math.min(256, grid);
   }
-  for (const v of views) v.autoPlace(grid);
+  const { reduction } = fitViews(views, grid);
 
   const { volume, stats } = carve(views, grid, palette, {
     mirrorMissing: args.mirror_missing !== false,
@@ -188,7 +188,8 @@ function toolCarveViews(args) {
       'grid: ' + grid + '^3',
       'voxels: ' + volume.solidCount,
       'extent: ' + extent + ' (x, y up, z toward the front view)',
-      'palette: ' + (palette.size - 1) + ' colours',
+      'palette: ' + (palette.size - 1) + ' colours' + (palette.overflowed ? ' (art had more; extras snapped to the nearest)' : ''),
+      reduction > 1.001 ? 'art reduced ' + reduction.toFixed(2) + 'x to fit the grid' : 'art used at one pixel per voxel',
       stats.mirrored.length ? 'mirrored from the opposite view: ' + stats.mirrored.join(', ') : 'all six views supplied',
       'carved in ' + stats.ms.toFixed(0) + ' ms',
     ].join('\n')
