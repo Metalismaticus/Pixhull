@@ -303,6 +303,11 @@ function build() {
   updateStats(stats, faces);
   updateZoomLabel();
   updateFramePreview();
+  // The solvers turn and mirror views inside the carve, so the slots have to be
+  // redrawn afterwards. Showing them untouched while the model had been turned
+  // meant pressing H fought an invisible flip - and locked the view into a state
+  // that was never visible.
+  refreshSlots();
   state.dirty = true;
 
   // Ordered by how badly each one invalidates the result. A drawing in the

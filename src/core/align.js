@@ -69,6 +69,17 @@ const LOOKS_ALONG = {
 const CAP_WEIGHT = 1.5;
 
 /**
+ * How much better an arrangement must score before it is worth disturbing a
+ * drawing the artist gave us.
+ *
+ * A near-symmetric subject - the back of a box lorry, say - scores almost the
+ * same mirrored as not, and acting on that margin just moves the door handles
+ * to the wrong side for no gain. Below this the arrangement that changes
+ * fewest drawings wins.
+ */
+const DECISIVE = 0.02;
+
+/**
  * A square stamp of the view's trimmed content - coverage and colour - before
  * any orientation is applied.
  * @param {import('./views.js').SourceView} view
@@ -259,8 +270,7 @@ export function alignViews(views) {
     };
   }
 
-  const pick = new Array(active.length).fill(0);
-  const best = { score: -Infinity, pick: pick.slice() };
+  const best = { score: -Infinity, changes: Infinity, pick: new Array(active.length).fill(0) };
 
   const score = (chosen) => {
     let total = 0;
@@ -294,8 +304,16 @@ export function alignViews(views) {
   const walk = (index, chosen) => {
     if (index === active.length) {
       const s = score(chosen);
-      if (s > best.score) {
+      // How many drawings this arrangement would disturb. On a symmetric object
+      // several arrangements score alike, and turning one for no gain is worse
+      // than leaving it: the artist sees a change they did not ask for.
+      let changes = 0;
+      for (let i = 0; i < active.length; i++) {
+        if (chosen[i].rotate !== active[i].rotate || chosen[i].flipH !== active[i].flipH) changes++;
+      }
+      if (s > best.score + DECISIVE || (s > best.score - DECISIVE && changes < best.changes)) {
         best.score = s;
+        best.changes = changes;
         best.pick = chosen.map((c, i) => options[i].indexOf(c));
       }
       return;
