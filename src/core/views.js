@@ -69,11 +69,13 @@ export class SourceView {
     this.offsetX = 0;
     this.offsetY = 0;
     /**
-     * Grid cells this view is allowed to fill, as {u0, u1, v0, v1} inclusive.
+     * Grid cells this view is allowed to fill, one byte per cell, or null.
      *
      * Set by fitViews when the drawings contradict each other about how far a
-     * thin part sticks out; null the rest of the time. See `clipContestedSpikes`.
-     * @type {{u0: number, u1: number, v0: number, v1: number} | null}
+     * thin part sticks out. It has to be a mask rather than a rectangle: what
+     * survives is "the body, plus the spike where another drawing puts it",
+     * which is two boxes, not one. See `clipContestedSpikes`.
+     * @type {Uint8Array | null}
      */
     this.clip = null;
     /** Set by autoPlace; kept so the UI can show "trimmed to 37x52". */
@@ -211,13 +213,12 @@ export class SourceView {
     const clip = this.clip;
 
     for (let v = 0; v < N; v++) {
-      if (clip && (v < clip.v0 || v > clip.v1)) continue;
       const b0 = Math.floor((v - this.offsetY) * sy);
       const b1 = Math.max(b0 + 1, Math.ceil((v + 1 - this.offsetY) * sy));
       if (b1 <= 0 || b0 >= viewH) continue;
 
       for (let u = 0; u < N; u++) {
-        if (clip && (u < clip.u0 || u > clip.u1)) continue;
+        if (clip && !clip[v * N + u]) continue;
         const a0 = Math.floor((u - this.offsetX) * sx);
         const a1 = Math.max(a0 + 1, Math.ceil((u + 1 - this.offsetX) * sx));
         if (a1 <= 0 || a0 >= viewW) continue;
@@ -478,12 +479,21 @@ function solve3(M, rhs) {
  */
 const SPIKE_MIN = 0.05;
 
-/** Occupancy of the oriented drawing along each of its own axes, in its own pixels. */
+/**
+ * Occupancy of the oriented drawing along each of its own axes, plus how far
+ * the content at each position reaches on the other axis. That reach is what
+ * lets one drawing's spike be matched against another's: two drawings that
+ * both show a wing mirror show it at the same height.
+ */
 function marginals(view) {
   const W = view.viewW;
   const H = view.viewH;
   const u = new Float64Array(W);
   const v = new Float64Array(H);
+  const uLo = new Float64Array(W).fill(H);
+  const uHi = new Float64Array(W).fill(-1);
+  const vLo = new Float64Array(H).fill(W);
+  const vHi = new Float64Array(H).fill(-1);
   const { data, width: iw } = view.image;
   for (let b = 0; b < H; b++) {
     for (let a = 0; a < W; a++) {
@@ -491,9 +501,13 @@ function marginals(view) {
       if (data[(py * iw + px) * 4 + 3] < ALPHA_THRESHOLD) continue;
       u[a]++;
       v[b]++;
+      if (b < uLo[a]) uLo[a] = b;
+      if (b > uHi[a]) uHi[a] = b;
+      if (a < vLo[b]) vLo[b] = a;
+      if (a > vHi[b]) vHi[b] = a;
     }
   }
-  return { u, v };
+  return { u: { m: u, lo: uLo, hi: uHi, span: H }, v: { m: v, lo: vLo, hi: vHi, span: W } };
 }
 
 /**
@@ -501,7 +515,7 @@ function marginals(view) {
  *
  * A wing mirror seen head-on is a few pixels of lorry hanging off the side:
  * the profile sits at a fifth of its usual value for thirty columns and then
- * steps back up to the body in a single column. That *step* is what is looked
+ * steps back up to the body in a single column. That step is what is looked
  * for - a run that stays thin and ends abruptly - rather than "anything below
  * a threshold", which also eats the bottom of a wheel, where the profile
  * tapers away instead of stepping.
@@ -526,92 +540,250 @@ function spikeDepth(m) {
 }
 
 /**
+ * Every thin spike a drawing has, described in model terms.
+ *
+ * Each record says which model axis the spike sticks out along, which end of
+ * it, how deep it runs as a fraction of the drawing, and - on the other axis
+ * the drawing spans - the band the spike occupies. That band is the evidence
+ * that two drawings are describing the same spike.
+ *
+ * @param {SourceView} view
+ */
+function spikesOf(view) {
+  const axes = IMAGE_AXES[view.name];
+  if (!axes) return [];
+  const m = marginals(view);
+  const out = [];
+  for (const which of /** @type {const} */ (['u', 'v'])) {
+    const other = which === 'u' ? 'v' : 'u';
+    const [axis, sign] = axes[which];
+    const [shareAxis, shareSign] = axes[other];
+    const { m: prof, lo, hi, span } = m[which];
+    const len = prof.length || 1;
+    const depth = spikeDepth(prof);
+    for (const imgEnd of /** @type {const} */ (['lo', 'hi'])) {
+      const run = depth[imgEnd];
+      // Model-low is image-low only when the axis runs with the image.
+      const end = (sign > 0) === (imgEnd === 'lo') ? 'min' : 'max';
+      if (run <= 0) {
+        out.push({ view, axis, end, depth: 0, shareAxis, lo: 0, hi: 1 });
+        continue;
+      }
+      // Only the tip of the spike, not the whole run. A lorry's outer tenth
+      // holds the mirror all the way out; by the time the run meets the body
+      // it has picked up the tyres as well, and a band covering both matches
+      // anything at all. The tip is the part that is unambiguously the spike.
+      const tip = Math.max(1, Math.round(run * 0.1));
+      let a = span;
+      let b = -1;
+      for (let k = 0; k < tip; k++) {
+        const i = imgEnd === 'lo' ? k : len - 1 - k;
+        if (hi[i] < 0) continue;
+        if (lo[i] < a) a = lo[i];
+        if (hi[i] > b) b = hi[i];
+      }
+      const f0 = b < 0 ? 0 : a / span;
+      const f1 = b < 0 ? 1 : (b + 1) / span;
+      out.push({
+        view,
+        axis,
+        end,
+        depth: run / len,
+        shareAxis,
+        lo: shareSign > 0 ? f0 : 1 - f1,
+        hi: shareSign > 0 ? f1 : 1 - f0,
+      });
+    }
+  }
+  return out;
+}
+
+/**
  * Stop one drawing's spike from being smeared down the length of the model.
  *
  * A lorry's wing mirrors stand 25% proud of the body seen head-on. Seen from
- * above, the artist drew them flush - the box body and the mirrors end at the
- * same line. Both drawings cannot be right, and fitting them by their bounding
- * boxes quietly picks the wrong one: the mirrors are made to coincide, so the
+ * above, the artist drew them flush - box body and mirrors end on the same
+ * line. Both drawings cannot be right, and fitting them by their bounding
+ * boxes quietly picks the wrong one: it makes the mirrors coincide, so the
  * body in the top view is stretched out to the mirrors' width, and every voxel
  * between the body and the mirror line is then vouched for by both drawings.
  * The result is a rail eight voxels tall running the whole length of the body
  * at mirror height. It is not a phantom of the method - it is one drawing's
  * mirror stretched into a girder.
  *
- * The contradiction is detectable: the front view separates the spike from the
- * body with a clean step, the top view has no step to separate. Where they
- * disagree like that, the drawing that resolves the spike is believed, and the
- * model is cut back to the body it describes. The spike itself goes with it -
- * nothing that can be trusted says how far out it really stands - but a lorry
- * without mirrors beats a lorry with a girder.
+ * The contradiction is detectable: the head-on view separates the spike from
+ * the body with a clean step, the top view has no step to separate. Where two
+ * drawings disagree like that the spike is real, but where it sits along the
+ * third axis is not yet known - and deleting it, which is what the first
+ * version of this did, throws away a mirror to be rid of a girder.
  *
- * Nothing happens when the drawings agree, which is the usual case: an aerial
- * drawn as a spike in every view is a spike in all of them, and is kept.
+ * It is knowable, though, from a drawing spanning that third axis that shows
+ * a spike of its own. The lorry's side view has a seven-pixel spike off the
+ * nose sitting at exactly the height the head-on mirror sits at. Two spikes
+ * that agree about where they are on the axis their drawings share are one
+ * spike seen twice, and the mirror belongs where they cross. Nothing outside
+ * the crossing survives, so the girder goes and the mirror stays.
+ *
+ * With no corroboration anywhere the spike is still dropped: one that cannot
+ * be placed does more harm smeared down the model than missing. Where the
+ * drawings agree - an aerial drawn as a spike in every view - nothing happens.
  *
  * @param {SourceView[]} active
  * @param {number} N
  * @param {{x: number, y: number, z: number}} cells extent of the model in grid cells
- * @returns {Array<{axis: string, amount: number}>} what was cut back, worst first
+ * @returns {Array<{axis: string, amount: number, kept: boolean}>} worst first
  */
-function clipContestedSpikes(active, N, cells) {
-  /** @type {Record<string, {min: number[], max: number[]}>} */
-  const claims = {};
-  for (const view of active) {
-    const m = marginals(view);
-    for (const which of /** @type {const} */ (['u', 'v'])) {
-      const [axis, sign] = IMAGE_AXES[view.name]?.[which] ?? [];
-      if (!axis) continue;
-      const d = spikeDepth(m[which]);
-      const len = m[which].length || 1;
-      claims[axis] ??= { min: [], max: [] };
-      // Image-low is model-low only when the axis runs with the image.
-      claims[axis].min.push((sign > 0 ? d.lo : d.hi) / len);
-      claims[axis].max.push((sign > 0 ? d.hi : d.lo) / len);
+/** Is this drawing one of the ones that failed to separate a contested spike? */
+function blindHere(view, allow) {
+  for (const axis of Object.keys(allow)) {
+    for (const end of Object.keys(allow[axis])) {
+      if (allow[axis][end].blind.has(view)) return true;
     }
   }
+  return false;
+}
 
-  /** @type {Record<string, [number, number]>} fraction cut from each end */
-  const cut = { x: [0, 0], y: [0, 0], z: [0, 0] };
+/**
+ * Inside a contested band, keep what a drawing shows as a small separate part
+ * and drop the long run beside it.
+ *
+ * The lorry's top view is the drawing that fails to separate the mirror: out
+ * at the edge it shows the box body, full width, and the mirror as a separate
+ * blob a fifth of the way along, clear of the box. One of those two is what
+ * genuinely belongs that far out, and it is not the three-hundred-pixel run.
+ * Keeping the short parts puts the mirror where this drawing says it is along
+ * the length, at the width the head-on drawing says, and takes the girder out
+ * in the same stroke - it *was* the long run.
+ *
+ * @param {SourceView} view
+ * @param {number} N
+ * @param {{x: number, y: number, z: number}} cells
+ */
+function keepShortParts(view, axes, allow, N, cells) {
+  const mask = view.sampleCells(N).mask;
+  const keep = new Uint8Array(N * N).fill(1);
+  for (const which of /** @type {const} */ (['u', 'v'])) {
+    const other = which === 'u' ? 'v' : 'u';
+    const [axis, sign] = axes[which];
+    const otherAxis = axes[other][0];
+    for (const end of /** @type {const} */ (['min', 'max'])) {
+      const cand = allow[axis] ? allow[axis][end] : undefined;
+      if (!cand || !cand.blind.has(view)) continue;
+      // A quarter of the model is not a detail hanging off the side of it.
+      const long = cells[otherAxis] * 0.25;
+      const at = (i, j) => (which === 'u' ? j * N + i : i * N + j);
+      for (let i = 0; i < N; i++) {
+        const pos = sign > 0 ? i : N - 1 - i;
+        if (pos < cand.band[0] || pos >= cand.band[1]) continue;
+        let start = -1;
+        for (let j = 0; j <= N; j++) {
+          const on = j < N && mask[at(i, j)];
+          if (on && start < 0) start = j;
+          if (!on && start >= 0) {
+            if (j - start > long) for (let k = start; k < j; k++) keep[at(i, k)] = 0;
+            start = -1;
+          }
+        }
+      }
+    }
+  }
+  return keep;
+}
+
+function clipContestedSpikes(active, N, cells) {
+  const AXES = /** @type {const} */ (['x', 'y', 'z']);
+  const spikes = [];
+  for (const view of active) spikes.push(...spikesOf(view));
+  if (spikes.length === 0) return [];
+
+  /** Grid cells axis `a` occupies, as [start, end). */
+  const box = {};
+  for (const a of AXES) {
+    const start = (N - cells[a]) / 2;
+    box[a] = [start, start + cells[a]];
+  }
+  /** The band of grid cells a spike of this depth covers at one end of an axis. */
+  const bandOf = (axis, end, depth) => {
+    const [s, e] = box[axis];
+    const size = e - s;
+    return end === 'min' ? [s, s + depth * size] : [e - depth * size, e];
+  };
+  const overlaps = (p, q) => Math.min(p.hi, q.hi) > Math.max(p.lo, q.lo);
+
+  /** axis -> end -> {band, bands}: where the contested spike is allowed to live */
+  const allow = {};
   const report = [];
-  for (const axis of /** @type {const} */ (['x', 'y', 'z'])) {
-    const claim = claims[axis];
-    if (!claim) continue;
-    for (const [i, end] of /** @type {const} */ ([[0, 'min'], [1, 'max']])) {
-      const depths = claim[end];
-      if (depths.length < 2) continue;
-      const deepest = Math.max(...depths);
-      const shallowest = Math.min(...depths);
+
+  for (const axis of AXES) {
+    for (const end of /** @type {const} */ (['min', 'max'])) {
+      const here = spikes.filter((s) => s.axis === axis && s.end === end);
+      if (here.length < 2) continue;
+      const deepest = Math.max(...here.map((s) => s.depth));
+      const shallowest = Math.min(...here.map((s) => s.depth));
       // Agreement - even agreement that there is no spike - is left alone.
       if (deepest < SPIKE_MIN || shallowest >= deepest / 2) continue;
-      cut[axis][i] = deepest;
-      report.push({ axis, amount: deepest });
+
+      const blind = new Set(here.filter((s) => s.depth === 0).map((s) => s.view));
+      const source = here.find((s) => s.depth === deepest);
+      const matches = spikes.filter((s) => s.depth > 0 && s.axis !== axis
+        && s.shareAxis === source.shareAxis && overlaps(s, source));
+      const bands = {};
+      for (const m of matches) (bands[m.axis] ??= []).push(bandOf(m.axis, m.end, m.depth));
+
+      allow[axis] ??= {};
+      allow[axis][end] = {
+        band: bandOf(axis, end, deepest),
+        bands,
+        // The drawings that do not separate the spike still show it. They are
+        // the ones asked, below, which part of what they show belongs there.
+        blind,
+      };
+      report.push({ axis, amount: deepest, kept: matches.length > 0 || blind.size > 0 });
     }
   }
   if (report.length === 0) return [];
 
-  // Turn the fractions into the band of grid cells the model may still fill,
-  // then hand each view the band in its own image coordinates.
-  /** @type {Record<string, [number, number]>} */
-  const band = {};
-  for (const axis of /** @type {const} */ (['x', 'y', 'z'])) {
-    const size = cells[axis];
-    const start = (N - size) / 2;
-    band[axis] = [
-      Math.ceil(start + cut[axis][0] * size),
-      Math.floor(start + size - 1 - cut[axis][1] * size),
-    ];
-  }
+  const anywhere = report.some((r) => r.kept)
+    || active.some((v) => IMAGE_AXES[v.name] && blindHere(v, allow));
+
   for (const view of active) {
     const axes = IMAGE_AXES[view.name];
     if (!axes) continue;
-    /** @type {Record<string, [number, number]>} */
-    const own = {};
-    for (const which of /** @type {const} */ (['u', 'v'])) {
-      const [axis, sign] = axes[which];
-      const [lo, hi] = band[axis];
-      own[which] = sign > 0 ? [lo, hi] : [N - 1 - hi, N - 1 - lo];
+    const mask = new Uint8Array(N * N).fill(1);
+    let touched = false;
+    const keep = blindHere(view, allow) ? keepShortParts(view, axes, allow, N, cells) : null;
+    for (let b = 0; b < N; b++) {
+      for (let a = 0; a < N; a++) {
+        let ok = true;
+        for (const which of /** @type {const} */ (['u', 'v'])) {
+          const other = which === 'u' ? 'v' : 'u';
+          const [axis, sign] = axes[which];
+          const otherAxis = axes[other][0];
+          const otherSign = axes[other][1];
+          const idx = which === 'u' ? a : b;
+          const otherIdx = other === 'u' ? a : b;
+          const pos = sign > 0 ? idx : N - 1 - idx;
+          const po = otherSign > 0 ? otherIdx : N - 1 - otherIdx;
+          for (const end of /** @type {const} */ (['min', 'max'])) {
+            const cand = allow[axis] ? allow[axis][end] : undefined;
+            if (!cand) continue;
+            if (pos < cand.band[0] || pos >= cand.band[1]) continue;
+            const where = cand.bands[otherAxis];
+            if (where) {
+              if (!where.some((r) => po >= r[0] && po < r[1])) ok = false;
+            } else if (!anywhere) {
+              ok = false;
+            }
+          }
+        }
+        if (keep && !keep[b * N + a]) ok = false;
+        if (!ok) {
+          mask[b * N + a] = 0;
+          touched = true;
+        }
+      }
     }
-    view.clip = { u0: own.u[0], u1: own.u[1], v0: own.v[0], v1: own.v[1] };
+    view.clip = touched ? mask : null;
   }
   return report.sort((a, b) => b.amount - a.amount);
 }

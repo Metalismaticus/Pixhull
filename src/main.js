@@ -332,7 +332,7 @@ function build() {
       amount: state.worstFit.amount.toFixed(2),
     }, 'warn');
   } else if (state.trimmed.length > 0) {
-    status('status.spikeTrimmed', {
+    status(state.trimmed[0].kept ? 'status.spikePlaced' : 'status.spikeTrimmed', {
       n: volume.solidCount,
       axis: ['axis.' + state.trimmed[0].axis],
       pct: Math.round(state.trimmed[0].amount * 100),
