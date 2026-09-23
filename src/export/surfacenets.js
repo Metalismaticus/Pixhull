@@ -153,41 +153,78 @@ export function buildSmoothMesh(vol, opts = {}) {
  * Laplacian smoothing: pull every vertex halfway towards the average of the
  * vertices it shares a quad with. Rounds off what surface nets leaves, at the
  * cost of a little shrinkage.
+ *
+ * Adjacency is kept as two flat arrays rather than a Set per vertex. On a
+ * detailed model this is hundreds of thousands of vertices, and allocating a
+ * Set for each one was enough to lock the tab up for the length of a coffee
+ * break the moment the rounding slider moved off zero.
+ *
+ * An edge shared by two quads is listed twice, which weights shared edges a
+ * little more heavily. That is a standard variant of the smoothing and not
+ * worth a deduplication pass to avoid.
+ *
  * @param {number[]} verts
  * @param {Map<number, number[][]>} byMaterial
  * @param {number} passes
  */
 function relaxVertices(verts, byMaterial, passes) {
   const count = verts.length / 3;
-  /** @type {Set<number>[]} */
-  const neighbours = Array.from({ length: count }, () => new Set());
+
+  let edges = 0;
+  for (const list of byMaterial.values()) edges += list.length * 8; // 4 edges, both ways
+
+  // Counting sort into CSR: how many neighbours each vertex has, then where
+  // its run starts, then the neighbours themselves.
+  const starts = new Int32Array(count + 1);
+  for (const list of byMaterial.values()) {
+    for (const quad of list) {
+      for (let i = 0; i < 4; i++) {
+        starts[quad[i] - 1 + 1]++;
+        starts[quad[(i + 1) % 4] - 1 + 1]++;
+      }
+    }
+  }
+  for (let i = 0; i < count; i++) starts[i + 1] += starts[i];
+
+  const cursor = starts.slice(0, count);
+  const neighbours = new Int32Array(edges);
   for (const list of byMaterial.values()) {
     for (const quad of list) {
       for (let i = 0; i < 4; i++) {
         const a = quad[i] - 1;
         const b = quad[(i + 1) % 4] - 1;
-        neighbours[a].add(b);
-        neighbours[b].add(a);
+        neighbours[cursor[a]++] = b;
+        neighbours[cursor[b]++] = a;
       }
     }
   }
 
+  const next = new Float64Array(verts.length);
+  const current = Float64Array.from(verts);
   for (let pass = 0; pass < passes; pass++) {
-    const next = verts.slice();
     for (let v = 0; v < count; v++) {
-      const near = neighbours[v];
-      if (near.size === 0) continue;
-      let sx = 0, sy = 0, sz = 0;
-      for (const n of near) {
-        sx += verts[n * 3];
-        sy += verts[n * 3 + 1];
-        sz += verts[n * 3 + 2];
+      const from = starts[v];
+      const to = starts[v + 1];
+      const k = to - from;
+      if (k === 0) {
+        next[v * 3] = current[v * 3];
+        next[v * 3 + 1] = current[v * 3 + 1];
+        next[v * 3 + 2] = current[v * 3 + 2];
+        continue;
       }
-      const k = near.size;
-      next[v * 3] = (verts[v * 3] + sx / k) / 2;
-      next[v * 3 + 1] = (verts[v * 3 + 1] + sy / k) / 2;
-      next[v * 3 + 2] = (verts[v * 3 + 2] + sz / k) / 2;
+      let sx = 0, sy = 0, sz = 0;
+      for (let i = from; i < to; i++) {
+        const n = neighbours[i] * 3;
+        sx += current[n];
+        sy += current[n + 1];
+        sz += current[n + 2];
+      }
+      next[v * 3] = (current[v * 3] + sx / k) / 2;
+      next[v * 3 + 1] = (current[v * 3 + 1] + sy / k) / 2;
+      next[v * 3 + 2] = (current[v * 3 + 2] + sz / k) / 2;
     }
-    verts.splice(0, verts.length, ...next);
+    current.set(next);
   }
+
+  for (let i = 0; i < verts.length; i++) verts[i] = current[i];
 }

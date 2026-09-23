@@ -63,13 +63,34 @@ export function carve(views, N, palette, opts = {}) {
   const t0 = performance.now();
   const N1 = N - 1;
 
-  /** @type {Record<string, {mask: Uint8Array, color: Uint8Array}>} */
-  const raster = {};
+  // Sample every view before choosing a single colour, then seed the palette
+  // with the colours that actually cover the most area.
+  //
+  // Filling it in arrival order is how a white box lorry comes out entirely
+  // grey: the anti-aliased body contributes hundreds of near-identical greys,
+  // they take all 255 slots, and the red cab - met later - gets resolved to
+  // the nearest thing already there, which is a grey.
+  /** @type {Record<string, {mask: Uint8Array, rgb: Int32Array}>} */
+  const sampled = {};
   const active = [];
   for (const v of views) {
     if (!v.enabled || v.trim.w === 0) continue;
-    raster[v.name] = v.rasterize(N, palette);
+    sampled[v.name] = v.sampleCells(N);
     active.push(v.name);
+  }
+  seedPalette(sampled, palette);
+
+  /** @type {Record<string, {mask: Uint8Array, color: Uint8Array}>} */
+  const raster = {};
+  for (const name of active) {
+    const { mask, rgb } = sampled[name];
+    const color = new Uint8Array(mask.length);
+    for (let i = 0; i < mask.length; i++) {
+      if (!mask[i]) continue;
+      const p = rgb[i];
+      color[i] = palette.add((p >> 16) & 255, (p >> 8) & 255, p & 255);
+    }
+    raster[name] = { mask, color };
   }
 
   const vol = Volume.cube(N);
@@ -137,6 +158,33 @@ export function carve(views, N, palette, opts = {}) {
       ms: performance.now() - t0,
     },
   };
+}
+
+/**
+ * Fill the palette in order of how much of the model each colour covers.
+ *
+ * Palette.add keeps the first entries it is given and resolves later ones to
+ * the nearest already present, so handing it colours most-used first is the
+ * whole mechanism: the real palette lands in the table and the anti-aliasing
+ * fringes fall back onto it.
+ *
+ * @param {Record<string, {mask: Uint8Array, rgb: Int32Array}>} sampled
+ * @param {import('./palette.js').Palette} palette
+ */
+function seedPalette(sampled, palette) {
+  /** @type {Map<number, number>} packed colour -> cells covered */
+  const counts = new Map();
+  for (const name of Object.keys(sampled)) {
+    const { mask, rgb } = sampled[name];
+    for (let i = 0; i < mask.length; i++) {
+      if (!mask[i]) continue;
+      counts.set(rgb[i], (counts.get(rgb[i]) ?? 0) + 1);
+    }
+  }
+  const byUse = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  for (const [packed] of byUse) {
+    palette.add((packed >> 16) & 255, (packed >> 8) & 255, packed & 255);
+  }
 }
 
 /**

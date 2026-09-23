@@ -118,6 +118,7 @@ function buildSlots() {
       '<canvas width="52" height="52"></canvas>' +
       '<span class="slot-size"></span>' +
       '<div class="slot-tools">' +
+      '<button data-act="r" data-i18n-title="views.rotate">↻</button>' +
       '<button data-act="h" data-i18n-title="views.flipH">H</button>' +
       '<button data-act="v" data-i18n-title="views.flipV">V</button>' +
       '<button data-act="x" data-i18n-title="views.remove">&times;</button>' +
@@ -155,7 +156,11 @@ function buildSlots() {
 function slotAction(name, act) {
   const view = state.views.get(name);
   if (!view) return;
-  if (act === 'h') view.flipH = !view.flipH;
+  if (act === 'r') {
+    // A hand-turned view is left alone by the automatic solver from here on.
+    view.rotate = (view.rotate + 90) % 360;
+    view.rotateLocked = true;
+  } else if (act === 'h') view.flipH = !view.flipH;
   else if (act === 'v') view.flipV = !view.flipV;
   else if (act === 'x') state.views.delete(name);
   refreshSlots();
@@ -192,7 +197,10 @@ function refreshSlots() {
 
     for (const btn of slot.querySelectorAll('.slot-tools button')) {
       const act = /** @type {HTMLElement} */ (btn).dataset.act;
-      btn.classList.toggle('on', !!view && ((act === 'h' && view.flipH) || (act === 'v' && view.flipV)));
+      btn.classList.toggle('on', !!view && (
+        (act === 'r' && view.rotate !== 0) ||
+        (act === 'h' && view.flipH) ||
+        (act === 'v' && view.flipV)));
     }
 
     const ctx = thumb.getContext('2d');
@@ -220,28 +228,25 @@ function drawThumb(ctx, view, w, h) {
   const tctx = tmp.getContext('2d');
   if (!tctx) return;
   tctx.putImageData(toImageData(src), 0, 0);
-  if (view.flipH || view.flipV) {
-    const flipped = document.createElement('canvas');
-    flipped.width = src.width;
-    flipped.height = src.height;
-    const fctx = flipped.getContext('2d');
-    if (fctx) {
-      fctx.imageSmoothingEnabled = false;
-      fctx.translate(view.flipH ? src.width : 0, view.flipV ? src.height : 0);
-      fctx.scale(view.flipH ? -1 : 1, view.flipV ? -1 : 1);
-      fctx.drawImage(tmp, 0, 0);
-      tmp.width = flipped.width;
-      tctx.clearRect(0, 0, tmp.width, tmp.height);
-      tctx.drawImage(flipped, 0, 0);
-    }
-  }
-  const s = Math.min(w / src.width, h / src.height);
-  const dw = Math.max(1, Math.floor(src.width * s));
-  const dh = Math.max(1, Math.floor(src.height * s));
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(tmp, Math.floor((w - dw) / 2), Math.floor((h - dh) / 2), dw, dh);
-}
 
+  // Rotation swaps which dimension has to fit.
+  const turned = view.rotate % 180 !== 0;
+  const vw = turned ? src.height : src.width;
+  const vh = turned ? src.width : src.height;
+  const s = Math.min(w / vw, h / vh);
+
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  ctx.translate(w / 2, h / 2);
+  ctx.rotate((view.rotate * Math.PI) / 180);
+  // Flips happen in the drawing's own space, before the turn, matching how
+  // the sampler maps a grid cell back to a source pixel.
+  ctx.scale(view.flipH ? -1 : 1, view.flipV ? -1 : 1);
+  const dw = src.width * s;
+  const dh = src.height * s;
+  ctx.drawImage(tmp, -dw / 2, -dh / 2, dw, dh);
+  ctx.restore();
+}
 /** Pick the smallest listed grid that fits the loaded art. */
 function autoGrid() {
   const need = suggestGridSize([...state.views.values()]);

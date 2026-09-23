@@ -50,6 +50,16 @@ export class SourceView {
     this.enabled = true;
     this.flipH = false;
     this.flipV = false;
+    /**
+     * Quarter turns applied to the drawing, 0 / 90 / 180 / 270.
+     *
+     * Artists lay a top view out lengthways to save sheet space, so its
+     * horizontal axis is the model’s length where the tool expects its width.
+     * Without this the axes cannot be made to agree at all.
+     */
+    this.rotate = 0;
+    /** True once the artist has turned this view themselves; the solver then leaves it be. */
+    this.rotateLocked = false;
     /** Source pixels per grid cell, per axis. 1 is one art pixel per voxel. */
     this.scaleX = 1;
     this.scaleY = 1;
@@ -81,22 +91,45 @@ export class SourceView {
   }
 
   /**
-   * Place this view on the grid at a given reduction.
-   *
-   * `scale` is source pixels per grid cell and must be the **same for every
-   * view in the set**. The views share axes - front's width is top's width, and
-   * so on - so scaling them independently would make those axes disagree and
-   * the intersection would carve a shape that is not in any of the drawings.
-   *
-   * Centres the *trimmed* content rather than the raw canvas, so padding the
-   * artist happened to leave in the PNG does not shift the model off-axis.
+   * Content size after rotation, in source pixels. Everything downstream works
+   * in this space rather than the raw trim.
+   */
+  get viewW() {
+    return this.rotate % 180 === 0 ? this.trim.w : this.trim.h;
+  }
+
+  get viewH() {
+    return this.rotate % 180 === 0 ? this.trim.h : this.trim.w;
+  }
+
+  /**
+   * Map a point in the rotated view's own space to a pixel of the source image.
+   * @param {number} a @param {number} b
+   * @returns {[number, number]} source x, y
+   */
+  toSource(a, b) {
+    const { w, h } = this.trim;
+    let tx, ty;
+    switch (this.rotate) {
+      case 90: tx = b; ty = h - 1 - a; break;
+      case 180: tx = w - 1 - a; ty = h - 1 - b; break;
+      case 270: tx = w - 1 - b; ty = a; break;
+      default: tx = a; ty = b;
+    }
+    if (this.flipH) tx = w - 1 - tx;
+    if (this.flipV) ty = h - 1 - ty;
+    return [this.trim.x + tx, this.trim.y + ty];
+  }
+
+  /**
+   * Centre the content on the grid at one art pixel per cell (or a uniform
+   * reduction), on whole-cell offsets.
    *
    * @param {number} N grid size
-   * @param {number} [scale] source pixels per grid cell; 1 keeps art 1:1
+   * @param {number} [scale] source pixels per grid cell
    */
   autoPlace(N, scale = 1) {
-    const t = this.trim;
-    if (t.w === 0) {
+    if (this.trim.w === 0) {
       this.scaleX = 1;
       this.scaleY = 1;
       this.offsetX = 0;
@@ -108,12 +141,12 @@ export class SourceView {
     // Whole-cell offsets. At one art pixel per voxel a fractional offset would
     // make every sampling box straddle two source pixels, which quietly changes
     // the silhouette of art that was meant to land exactly.
-    this.offsetX = Math.round((N - t.w / scale) / 2) - t.x / scale;
-    this.offsetY = Math.round((N - t.h / scale) / 2) - t.y / scale;
+    this.offsetX = Math.round((N - this.viewW / scale) / 2);
+    this.offsetY = Math.round((N - this.viewH / scale) / 2);
   }
 
   /**
-   * Place the trimmed content in a box of `gw` x `gh` grid cells, centred.
+   * Place the content in a box of `gw` x `gh` grid cells, centred.
    *
    * The two axes scale independently on purpose. Hand-drawn reference sheets
    * routinely disagree about a shared axis - a side view drawn 18% shorter
@@ -126,21 +159,22 @@ export class SourceView {
    * @param {number} gh height in grid cells
    */
   place(N, gw, gh) {
-    const t = this.trim;
-    if (t.w === 0 || gw <= 0 || gh <= 0) {
+    if (this.trim.w === 0 || gw <= 0 || gh <= 0) {
       this.scaleX = 1;
       this.scaleY = 1;
       this.offsetX = 0;
       this.offsetY = 0;
       return;
     }
-    this.scaleX = t.w / gw;
-    this.scaleY = t.h / gh;
-    this.offsetX = (N - gw) / 2 - t.x / this.scaleX;
-    this.offsetY = (N - gh) / 2 - t.y / this.scaleY;
+    this.scaleX = this.viewW / gw;
+    this.scaleY = this.viewH / gh;
+    this.offsetX = (N - gw) / 2;
+    this.offsetY = (N - gh) / 2;
   }
+
   /**
-   * Flatten to grid-sized mask + colour lookup, reducing the art to fit.
+   * Flatten to a grid-sized mask plus one colour per cell, reducing the art to
+   * fit.
    *
    * Each grid cell covers a box of source pixels. A cell is solid when most of
    * that box is, and takes the box's most common colour. Point sampling would
@@ -150,36 +184,39 @@ export class SourceView {
    * fringe that belongs to neither side.
    *
    * @param {number} N
-   * @param {import('./palette.js').Palette} palette
-   * @returns {{mask: Uint8Array, color: Uint8Array}}
+   * @returns {{mask: Uint8Array, rgb: Int32Array}} rgb is packed 0xRRGGBB, -1 where empty
    */
-  rasterize(N, palette) {
+  sampleCells(N) {
     const mask = new Uint8Array(N * N);
-    const color = new Uint8Array(N * N);
-    const { width: w, height: h, data } = this.image;
+    const rgb = new Int32Array(N * N).fill(-1);
+    const { width: iw, data } = this.image;
     const sx = this.scaleX;
     const sy = this.scaleY;
+    const viewW = this.viewW;
+    const viewH = this.viewH;
     /** @type {Map<number, number>} packed colour -> pixels in this cell */
     const tally = new Map();
 
     for (let v = 0; v < N; v++) {
-      const y0 = Math.floor((v - this.offsetY) * sy);
-      const y1 = Math.max(y0 + 1, Math.ceil((v + 1 - this.offsetY) * sy));
+      const b0 = Math.floor((v - this.offsetY) * sy);
+      const b1 = Math.max(b0 + 1, Math.ceil((v + 1 - this.offsetY) * sy));
+      if (b1 <= 0 || b0 >= viewH) continue;
+
       for (let u = 0; u < N; u++) {
-        const x0 = Math.floor((u - this.offsetX) * sx);
-        const x1 = Math.max(x0 + 1, Math.ceil((u + 1 - this.offsetX) * sx));
+        const a0 = Math.floor((u - this.offsetX) * sx);
+        const a1 = Math.max(a0 + 1, Math.ceil((u + 1 - this.offsetX) * sx));
+        if (a1 <= 0 || a0 >= viewW) continue;
 
         let opaque = 0;
         let total = 0;
         tally.clear();
 
-        for (let y = y0; y < y1; y++) {
-          for (let x = x0; x < x1; x++) {
+        for (let b = b0; b < b1; b++) {
+          for (let a = a0; a < a1; a++) {
             total++;
-            const sx = this.flipH ? w - 1 - x : x;
-            const sy = this.flipV ? h - 1 - y : y;
-            if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue;
-            const i = (sy * w + sx) * 4;
+            if (a < 0 || b < 0 || a >= viewW || b >= viewH) continue;
+            const [px, py] = this.toSource(a, b);
+            const i = (py * iw + px) * 4;
             if (data[i + 3] < ALPHA_THRESHOLD) continue;
             opaque++;
             const key = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
@@ -201,8 +238,25 @@ export class SourceView {
         }
         const o = v * N + u;
         mask[o] = 1;
-        color[o] = palette.add((best >> 16) & 255, (best >> 8) & 255, best & 255);
+        rgb[o] = best;
       }
+    }
+    return { mask, rgb };
+  }
+
+  /**
+   * Sample, then look every colour up in a palette that has already been chosen.
+   * @param {number} N
+   * @param {import('./palette.js').Palette} palette
+   * @returns {{mask: Uint8Array, color: Uint8Array}}
+   */
+  rasterize(N, palette) {
+    const { mask, rgb } = this.sampleCells(N);
+    const color = new Uint8Array(mask.length);
+    for (let i = 0; i < mask.length; i++) {
+      if (!mask[i]) continue;
+      const c = rgb[i];
+      color[i] = palette.add((c >> 16) & 255, (c >> 8) & 255, c & 255);
     }
     return { mask, color };
   }
@@ -252,8 +306,68 @@ export const VIEW_AXES = {
  *   disagreed most with the others, which is the honest diagnostic when a
  *   reference sheet turns out to be illustrations rather than projections
  */
+/**
+ * Pick a quarter turn for each view so the axes they share agree.
+ *
+ * A top view laid out lengthways has the model’s length across the image
+ * where the tool expects its width, and no amount of scaling reconciles that -
+ * on a box lorry it asked for a 2.07x stretch and still came out wrong.
+ * Turning it is the fix.
+ *
+ * Only 0 and 90 are tried, since 180 and 270 leave the dimensions unchanged
+ * and cannot affect the agreement. Six views is 64 combinations, so the
+ * search is exhaustive rather than clever. Ties go to the arrangement that
+ * turns fewest drawings, and anything the artist has turned by hand is left
+ * alone.
+ *
+ * @param {SourceView[]} active
+ */
+function chooseRotations(active) {
+  const free = active.filter((v) => !v.rotateLocked);
+  if (free.length === 0) return;
+
+  const dimsFor = (v, turned) => (turned ? [v.trim.h, v.trim.w] : [v.trim.w, v.trim.h]);
+
+  let bestMask = 0;
+  let bestScore = Infinity;
+  let bestTurns = Infinity;
+
+  for (let mask = 0; mask < (1 << free.length); mask++) {
+    /** @type {{x: number[], y: number[], z: number[]}} */
+    const seen = { x: [], y: [], z: [] };
+    for (const v of active) {
+      const axes = VIEW_AXES[v.name] ?? ['x', 'y'];
+      const slot = free.indexOf(v);
+      const turned = slot < 0 ? v.rotate % 180 !== 0 : ((mask >> slot) & 1) === 1;
+      const [w, h] = dimsFor(v, turned);
+      seen[axes[0]].push(w);
+      seen[axes[1]].push(h);
+    }
+
+    // How far apart the claims about each axis are, summed.
+    let score = 0;
+    for (const axis of ['x', 'y', 'z']) {
+      const vals = seen[axis];
+      if (vals.length < 2) continue;
+      score += Math.max(...vals) / Math.min(...vals) - 1;
+    }
+
+    let turns = 0;
+    for (let i = 0; i < free.length; i++) if ((mask >> i) & 1) turns++;
+
+    if (score < bestScore - 1e-9 || (Math.abs(score - bestScore) < 1e-9 && turns < bestTurns)) {
+      bestScore = score;
+      bestTurns = turns;
+      bestMask = mask;
+    }
+  }
+
+  free.forEach((v, i) => { v.rotate = ((bestMask >> i) & 1) ? 90 : 0; });
+}
 export function fitViews(views, N) {
   const active = views.filter((v) => v.enabled && v.trim.w > 0);
+  chooseRotations(active);
+
   const none = { name: null, amount: 1 };
   if (active.length === 0) return { reduction: 1, extent: { x: 1, y: 1, z: 1 }, reconciled: false, worst: none };
 
@@ -261,8 +375,8 @@ export function fitViews(views, N) {
   const seen = { x: [], y: [], z: [] };
   for (const v of active) {
     const axes = VIEW_AXES[v.name] ?? ['x', 'y'];
-    seen[axes[0]].push(v.trim.w);
-    seen[axes[1]].push(v.trim.h);
+    seen[axes[0]].push(v.viewW);
+    seen[axes[1]].push(v.viewH);
   }
 
   // The largest claim wins. An orthographic silhouette spans the whole model
@@ -293,8 +407,8 @@ export function fitViews(views, N) {
     const wantH = cells[axes[1]];
     v.place(N, wantW, wantH);
     if (!v.enabled || v.trim.w === 0) continue;
-    const haveW = v.trim.w / reduction;
-    const haveH = v.trim.h / reduction;
+    const haveW = v.viewW / reduction;
+    const haveH = v.viewH / reduction;
     const amount = Math.max(wantW / haveW, haveW / wantW, wantH / haveH, haveH / wantH);
     if (amount > worst.amount) {
       worst.amount = amount;

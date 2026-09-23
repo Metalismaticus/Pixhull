@@ -211,6 +211,25 @@ bounding box first, so aspect and placement cannot disguise the match.
 On a real sheet whose bottom two drawings were three-quarter beauty shots
 rather than projections, top vs front scored 0.79 and top vs back 0.81,
 against 0.52 for the genuine side view. The status bar now names the pair.
+### A palette chosen by coverage, not by arrival
+
+Colours used to be interned in the order they were met, which is how a white
+box lorry came out entirely grey: the anti-aliased body contributed hundreds
+of near-identical greys, they filled all 255 slots, and the red cab — met
+later — was resolved to the nearest thing already in the table, which was a
+grey. Every view is now sampled first, and the palette seeded with the colours
+that cover the most of the model, so the real palette lands in the table and
+the anti-aliasing fringes fall back onto it.
+
+### Views drawn lying down
+
+Artists lay a top view out lengthways to save sheet space, so its horizontal
+axis is the model’s length where the tool expects its width. No amount of
+scaling reconciles that — on a box lorry it asked for a 2.07× stretch and was
+still wrong. Each view can be turned a quarter at a time, and the fitting step
+picks the turns that make the shared axes agree, searching all 64 combinations
+because six views is small enough not to need cleverness. That took the lorry
+from 2.07× down to 1.26×. A view turned by hand is left alone thereafter.
 ### Any image size
 
 Views do not have to be square, do not have to match each other, and do not
