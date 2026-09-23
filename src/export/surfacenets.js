@@ -1,12 +1,26 @@
 // @ts-check
 /**
- * Smooth mesh generation over the same voxel volume (naive surface nets).
+ * Smooth mesh generation over the same voxel volume (dual contouring).
  *
  * The carve is a lattice and always will be - that is what shape-from-silhouette
- * on a grid produces. But nothing forces the *exported mesh* to be cubes. Surface
- * nets place one vertex per grid cell the surface passes through, positioned at
- * the average of the edge crossings, which turns a staircase into a rounded
- * low-poly shell. Same voxels, same palette, model a game engine is happy with.
+ * on a grid produces. But nothing forces the *exported mesh* to be cubes. One
+ * vertex is placed per grid cell the surface passes through, and where it goes
+ * in that cell is the whole question. Same voxels, same palette, a model a game
+ * engine is happy with.
+ *
+ * At the average of the edge crossings - plain surface nets - the result is
+ * still visibly a staircase, and the obvious cure, dragging every vertex
+ * towards its neighbours, cannot tell a staircase from a corner: it rounded
+ * the sloped windscreen of a lorry and the square corner of its box body by
+ * the same amount, so the cab stayed stepped and the body started to sag.
+ *
+ * Dual contouring asks a better question. Give each crossing the direction the
+ * surface faces there and put the vertex where all those planes meet. A
+ * staircase standing in for a slope has one normal direction, so its vertices
+ * slide onto the slope and the steps vanish; a corner has two or three, which
+ * pin the vertex to the corner and keep it sharp. Nobody has to label which is
+ * which. The directions come from a blurred copy of the occupancy, because a
+ * binary lattice on its own only knows six of them.
  *
  * The dual grid: a cell sits between eight voxel centres. If those eight are not
  * all solid or all empty, the surface crosses the cell and it gets a vertex.
@@ -33,8 +47,136 @@ const CUBE_EDGES = [
 ];
 
 /**
+ * Occupancy blurred into a density field over the model's bounding box.
+ *
+ * A binary lattice has only six normals, and a surface built from them is
+ * blocky by construction - which is why the first attempt at rounding had to
+ * drag every vertex towards its neighbours and rounded the corners of the box
+ * body as eagerly as the slope of a windscreen. Blurring first gives the
+ * surface a *gradient*: across a staircase the density falls off along the
+ * slope, so the normals there all point the same way, while at a real corner
+ * they stay in two distinct groups. That difference is what lets the vertex
+ * solver below tell a corner from a staircase.
+ *
+ * Three separable passes with a running sum, so cost does not grow with the
+ * radius.
+ *
  * @param {import('../core/volume.js').Volume} vol
- * @param {{relax?: number}} [opts] Laplacian passes; 0 is plain surface nets
+ * @param {{min: number[], max: number[]}} box
+ * @param {number} radius
+ */
+function densityField(vol, box, radius) {
+  const pad = radius + 2;
+  const ox = box.min[0] - pad;
+  const oy = box.min[1] - pad;
+  const oz = box.min[2] - pad;
+  const nx = box.max[0] - box.min[0] + 1 + 2 * pad;
+  const ny = box.max[1] - box.min[1] + 1 + 2 * pad;
+  const nz = box.max[2] - box.min[2] + 1 + 2 * pad;
+  const data = new Float32Array(nx * ny * nz);
+  const at = (i, j, k) => (k * ny + j) * nx + i;
+
+  for (let k = 0; k < nz; k++) {
+    for (let j = 0; j < ny; j++) {
+      for (let i = 0; i < nx; i++) {
+        if (vol.get(ox + i, oy + j, oz + k)) data[at(i, j, k)] = 1;
+      }
+    }
+  }
+
+  const width = 2 * radius + 1;
+  const line = new Float32Array(Math.max(nx, ny, nz));
+  /** One separable pass: `count` samples `step` apart starting at `base`. */
+  const blur = (base, step, count) => {
+    for (let i = 0; i < count; i++) line[i] = data[base + i * step];
+    let sum = 0;
+    for (let i = 0; i <= radius && i < count; i++) sum += line[i];
+    for (let i = 0; i < count; i++) {
+      data[base + i * step] = sum / width;
+      const drop = i - radius;
+      const add = i + radius + 1;
+      if (drop >= 0) sum -= line[drop];
+      if (add < count) sum += line[add];
+    }
+  };
+  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) blur(at(0, j, k), 1, nx);
+  for (let k = 0; k < nz; k++) for (let i = 0; i < nx; i++) blur(at(i, 0, k), nx, ny);
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) blur(at(i, j, 0), nx * ny, nz);
+
+  return {
+    /** Gradient at a voxel centre, in voxel-index space. */
+    grad(x, y, z) {
+      const i = x - ox;
+      const j = y - oy;
+      const k = z - oz;
+      if (i < 1 || j < 1 || k < 1 || i >= nx - 1 || j >= ny - 1 || k >= nz - 1) return null;
+      return [
+        data[at(i + 1, j, k)] - data[at(i - 1, j, k)],
+        data[at(i, j + 1, k)] - data[at(i, j - 1, k)],
+        data[at(i, j, k + 1)] - data[at(i, j, k - 1)],
+      ];
+    },
+  };
+}
+
+/**
+ * Where to put a cell's vertex, given the crossings and the surface normals
+ * there: at the point that lies on all of their planes at once, or as close
+ * to it as a point can get.
+ *
+ * On a flat face every normal is the same and the planes coincide, so the
+ * problem is rank one - the solution is free to slide along the face, and the
+ * pull towards the average crossing decides where. On a staircase the blurred
+ * normals all follow the slope, so the same thing happens and the vertex lands
+ * on the slope rather than on the step: the staircase melts. At a genuine
+ * corner two or three normals disagree, the problem gains rank, and the only
+ * point on all the planes is the corner itself - which is why the box body
+ * keeps its edges while the cab rounds off, without anyone labelling either.
+ *
+ * @param {number[][]} normals @param {number[][]} points @param {number[]} mass
+ */
+function solveVertex(normals, points, mass) {
+  const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  const b = [0, 0, 0];
+  for (let i = 0; i < normals.length; i++) {
+    const n = normals[i];
+    const d = n[0] * points[i][0] + n[1] * points[i][1] + n[2] * points[i][2];
+    for (let r = 0; r < 3; r++) {
+      for (let c = 0; c < 3; c++) A[r][c] += n[r] * n[c];
+      b[r] += n[r] * d;
+    }
+  }
+  // The pull towards the average crossing. It fixes the directions the normals
+  // say nothing about, and nothing else: on a corner, where they say
+  // everything, it is swamped.
+  const W = 0.08;
+  for (let r = 0; r < 3; r++) {
+    A[r][r] += W;
+    b[r] += W * mass[r];
+  }
+
+  const m = A.map((row, i) => [...row, b[i]]);
+  for (let col = 0; col < 3; col++) {
+    let pivot = col;
+    for (let r = col + 1; r < 3; r++) if (Math.abs(m[r][col]) > Math.abs(m[pivot][col])) pivot = r;
+    const swap = m[col];
+    m[col] = m[pivot];
+    m[pivot] = swap;
+    if (Math.abs(m[col][col]) < 1e-9) continue;
+    for (let r = 0; r < 3; r++) {
+      if (r === col) continue;
+      const f = m[r][col] / m[col][col];
+      for (let c = col; c < 4; c++) m[r][c] -= f * m[col][c];
+    }
+  }
+  const out = [0, 1, 2].map((i) => (Math.abs(m[i][i]) < 1e-9 ? mass[i] : m[i][3] / m[i][i]));
+  return out.map((v, i) => (Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : mass[i]));
+}
+
+/**
+ * @param {import('../core/volume.js').Volume} vol
+ * @param {{relax?: number}} [opts] 0 is plain surface nets; above that, how far
+ *   the density is blurred before the normals are read off it
  * @returns {SmoothMesh}
  */
 export function buildSmoothMesh(vol, opts = {}) {
@@ -53,6 +195,7 @@ export function buildSmoothMesh(vol, opts = {}) {
 
   const box = vol.bounds();
   if (!box) return { verts: [], byMaterial: new Map(), quads: 0 };
+  const field = relax > 0 ? densityField(vol, box, Math.min(4, relax)) : null;
 
   // Only cells touching the model can straddle the surface.
   for (let k = box.min[2] - 1; k <= box.max[2]; k++) {
@@ -65,24 +208,45 @@ export function buildSmoothMesh(vol, opts = {}) {
         }
         if (mask === 0 || mask === 255) continue;
 
-        // Average the midpoints of every edge whose two corners disagree.
-        // Occupancy is binary, so a crossing always sits at the midpoint.
+        // Every edge whose two corners disagree is crossed by the surface, and
+        // occupancy being binary, a crossing always sits at the midpoint.
         let sx = 0, sy = 0, sz = 0, n = 0;
+        const points = [];
+        const normals = [];
         for (const [a, b] of CUBE_EDGES) {
           const inA = (mask >> a) & 1;
           const inB = (mask >> b) & 1;
           if (inA === inB) continue;
-          sx += ((a & 1) + (b & 1)) / 2;
-          sy += (((a >> 1) & 1) + ((b >> 1) & 1)) / 2;
-          sz += (((a >> 2) & 1) + ((b >> 2) & 1)) / 2;
+          const px = ((a & 1) + (b & 1)) / 2;
+          const py = (((a >> 1) & 1) + ((b >> 1) & 1)) / 2;
+          const pz = (((a >> 2) & 1) + ((b >> 2) & 1)) / 2;
+          sx += px;
+          sy += py;
+          sz += pz;
           n++;
+          if (!field) continue;
+          const ga = field.grad(i + (a & 1), j + ((a >> 1) & 1), k + ((a >> 2) & 1));
+          const gb = field.grad(i + (b & 1), j + ((b >> 1) & 1), k + ((b >> 2) & 1));
+          if (!ga || !gb) continue;
+          // Density rises into the solid, so the outward normal runs against
+          // the gradient. The sign cancels in the solver; consistency does not.
+          const gx = -(ga[0] + gb[0]);
+          const gy = -(ga[1] + gb[1]);
+          const gz = -(ga[2] + gb[2]);
+          const len = Math.hypot(gx, gy, gz);
+          if (len < 1e-6) continue;
+          normals.push([gx / len, gy / len, gz / len]);
+          points.push([px, py, pz]);
         }
         if (n === 0) continue;
+
+        const mass = [sx / n, sy / n, sz / n];
+        const local = normals.length >= 2 ? solveVertex(normals, points, mass) : mass;
 
         // Corner c of this cell is the centre of voxel (i + bit, ...), which in
         // world units is i + bit + 0.5.
         cellVertex.set(cellId(i, j, k), verts.length / 3);
-        verts.push(i + 0.5 + sx / n, j + 0.5 + sy / n, k + 0.5 + sz / n);
+        verts.push(i + 0.5 + local[0], j + 0.5 + local[1], k + 0.5 + local[2]);
       }
     }
   }
@@ -144,87 +308,6 @@ export function buildSmoothMesh(vol, opts = {}) {
     }
   }
 
-  if (relax > 0) relaxVertices(verts, byMaterial, relax);
-
   return { verts, byMaterial, quads };
 }
 
-/**
- * Laplacian smoothing: pull every vertex halfway towards the average of the
- * vertices it shares a quad with. Rounds off what surface nets leaves, at the
- * cost of a little shrinkage.
- *
- * Adjacency is kept as two flat arrays rather than a Set per vertex. On a
- * detailed model this is hundreds of thousands of vertices, and allocating a
- * Set for each one was enough to lock the tab up for the length of a coffee
- * break the moment the rounding slider moved off zero.
- *
- * An edge shared by two quads is listed twice, which weights shared edges a
- * little more heavily. That is a standard variant of the smoothing and not
- * worth a deduplication pass to avoid.
- *
- * @param {number[]} verts
- * @param {Map<number, number[][]>} byMaterial
- * @param {number} passes
- */
-function relaxVertices(verts, byMaterial, passes) {
-  const count = verts.length / 3;
-
-  let edges = 0;
-  for (const list of byMaterial.values()) edges += list.length * 8; // 4 edges, both ways
-
-  // Counting sort into CSR: how many neighbours each vertex has, then where
-  // its run starts, then the neighbours themselves.
-  const starts = new Int32Array(count + 1);
-  for (const list of byMaterial.values()) {
-    for (const quad of list) {
-      for (let i = 0; i < 4; i++) {
-        starts[quad[i] - 1 + 1]++;
-        starts[quad[(i + 1) % 4] - 1 + 1]++;
-      }
-    }
-  }
-  for (let i = 0; i < count; i++) starts[i + 1] += starts[i];
-
-  const cursor = starts.slice(0, count);
-  const neighbours = new Int32Array(edges);
-  for (const list of byMaterial.values()) {
-    for (const quad of list) {
-      for (let i = 0; i < 4; i++) {
-        const a = quad[i] - 1;
-        const b = quad[(i + 1) % 4] - 1;
-        neighbours[cursor[a]++] = b;
-        neighbours[cursor[b]++] = a;
-      }
-    }
-  }
-
-  const next = new Float64Array(verts.length);
-  const current = Float64Array.from(verts);
-  for (let pass = 0; pass < passes; pass++) {
-    for (let v = 0; v < count; v++) {
-      const from = starts[v];
-      const to = starts[v + 1];
-      const k = to - from;
-      if (k === 0) {
-        next[v * 3] = current[v * 3];
-        next[v * 3 + 1] = current[v * 3 + 1];
-        next[v * 3 + 2] = current[v * 3 + 2];
-        continue;
-      }
-      let sx = 0, sy = 0, sz = 0;
-      for (let i = from; i < to; i++) {
-        const n = neighbours[i] * 3;
-        sx += current[n];
-        sy += current[n + 1];
-        sz += current[n + 2];
-      }
-      next[v * 3] = (current[v * 3] + sx / k) / 2;
-      next[v * 3 + 1] = (current[v * 3 + 1] + sy / k) / 2;
-      next[v * 3 + 2] = (current[v * 3 + 2] + sz / k) / 2;
-    }
-    current.set(next);
-  }
-
-  for (let i = 0; i < verts.length; i++) verts[i] = current[i];
-}
