@@ -5,3 +5,9 @@ Thumbs.db
 *.log
 .claude/settings.local.json
 _tmp-*
+
+# studio: процесс живёт в папке, но не в репозитории
+.claude/settings.json
+.claude/skills/
+.claude/agents/
+.claude/studio/
