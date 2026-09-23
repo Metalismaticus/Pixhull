@@ -11,13 +11,14 @@ import { OrthoCamera, PITCH_PRESETS, directionYaws, DEG } from './gfx/camera.js'
 import { renderTurnaround, packSheet, snapToPalette, imageDataToPng, downloadBlob } from './export/sprite.js';
 import { exportObj } from './export/obj.js';
 import { exportVox } from './export/vox.js';
+import { buildSmoothMesh } from './export/surfacenets.js';
 import { makeZip, blobBytes } from './export/zip.js';
 import { buildDemoViews } from './demo.js';
 import { t, num, getLang, setLang, applyTranslations } from './i18n.js';
 import { detectTheme, getTheme, setTheme, toggleTheme, cssColorToGl } from './ui/theme.js';
-import { screenRay, raycastVoxel } from './edit/pick.js';
+import { screenRay, raycastVoxel, rayPlanePoint } from './edit/pick.js';
 import { History } from './edit/history.js';
-import { applyTool } from './edit/tools.js';
+import { applyTool, boxExtent, applyBox } from './edit/tools.js';
 import { serializeVolume, deserializeVolume } from './core/serialize.js';
 
 /** @param {string} id */
@@ -43,7 +44,7 @@ const state = {
   /** the instance buffer is stale; coalesced to one rebuild per frame */
   geometryDirty: false,
 
-  /** @type {'orbit'|'paint'|'fill'|'erase'|'add'|'pick'} */
+  /** @type {'orbit'|'paint'|'fill'|'erase'|'add'|'pick'|'box'|'boxErase'} */
   tool: 'orbit',
   /** palette index the editing tools apply */
   color: 1,
@@ -420,6 +421,8 @@ const TOOL_BUTTONS = [
   { id: 'erase', key: 'tool.erase', glyph: '⌫', hotkey: 'e' },
   { id: 'add', key: 'tool.add', glyph: '⬜', hotkey: 'a' },
   { id: 'pick', key: 'tool.pick', glyph: '◔', hotkey: 'i' },
+  { id: 'box', key: 'tool.box', glyph: '⬛', hotkey: 'r' },
+  { id: 'boxErase', key: 'tool.boxErase', glyph: '⬚', hotkey: 't' },
 ];
 
 function buildToolBar() {
@@ -544,6 +547,90 @@ function redo() {
   status('status.redone');
 }
 
+/**
+ * Live state of a box drag: where it began and the cuboid it currently covers.
+ * @type {{anchor: {x: number, y: number, z: number, face: number}, extent: {min: [number,number,number], max: [number,number,number]}} | null}
+ */
+let boxDrag = null;
+
+const isBoxTool = () => state.tool === 'box' || state.tool === 'boxErase';
+
+/**
+ * The far corner of the drag, found by meeting the plane of the face it began
+ * on. Using the plane rather than a second voxel hit means the rectangle keeps
+ * growing when the pointer wanders off the model.
+ * @param {PointerEvent} e
+ * @param {{x: number, y: number, z: number, face: number}} anchor
+ * @returns {[number, number, number]}
+ */
+function boxCornerAt(e, anchor) {
+  const vol = state.volume;
+  const fallback = /** @type {[number, number, number]} */ ([anchor.x, anchor.y, anchor.z]);
+  if (!vol) return fallback;
+
+  const rect = canvas.getBoundingClientRect();
+  const sx = ((e.clientX - rect.left) / rect.width) * canvas.width;
+  const sy = ((e.clientY - rect.top) / rect.height) * canvas.height;
+  const ray = screenRay(camera, sx, sy, canvas.width, canvas.height);
+
+  const axis = anchor.face >> 1;
+  // Even face indices point along +axis, so their plane sits one step further on.
+  const plane = [anchor.x, anchor.y, anchor.z][axis] + (anchor.face % 2 === 0 ? 1 : 0);
+  const hit = rayPlanePoint(ray.origin, ray.dir, axis, plane);
+  if (!hit) return fallback;
+
+  const dims = [vol.nx, vol.ny, vol.nz];
+  const out = fallback.slice();
+  for (let i = 0; i < 3; i++) {
+    if (i === axis) continue;
+    out[i] = Math.max(0, Math.min(dims[i] - 1, Math.floor(hit[i])));
+  }
+  return /** @type {[number, number, number]} */ (out);
+}
+
+/** @param {PointerEvent} e */
+function updateBoxDrag(e) {
+  if (!boxDrag || !state.volume) return;
+  const corner = boxCornerAt(e, boxDrag.anchor);
+  const extent = boxExtent(boxDrag.anchor, corner, state.brush + 1, state.tool === 'box');
+  const vol = state.volume;
+  const dims = [vol.nx, vol.ny, vol.nz];
+  for (let i = 0; i < 3; i++) {
+    extent.min[i] = Math.max(0, Math.min(dims[i] - 1, extent.min[i]));
+    extent.max[i] = Math.max(0, Math.min(dims[i] - 1, extent.max[i]));
+  }
+  boxDrag.extent = extent;
+  renderer.setPreviewBox(extent.min, extent.max);
+  state.dirty = true;
+}
+
+function commitBoxDrag() {
+  const drag = boxDrag;
+  boxDrag = null;
+  renderer.clearPreviewBox();
+  state.dirty = true;
+  if (!drag || !state.volume) return;
+
+  state.history.begin();
+  const changed = applyBox(state.volume, drag.extent, {
+    fill: state.tool === 'box',
+    color: state.color,
+    symmetryX: /** @type {HTMLInputElement} */ ($('symmetry-x')).checked,
+    history: state.history,
+  });
+  if (changed > 0) {
+    state.geometryDirty = true;
+    if (state.history.commit(state.volume)) refreshHistoryButtons();
+    status('status.boxApplied', {
+      n: changed,
+      w: drag.extent.max[0] - drag.extent.min[0] + 1,
+      h: drag.extent.max[1] - drag.extent.min[1] + 1,
+      d: drag.extent.max[2] - drag.extent.min[2] + 1,
+    });
+  } else {
+    state.history.commit(state.volume);
+  }
+}
 function setupPointer() {
   let mode = /** @type {null | 'orbit' | 'pan' | 'tool'} */ (null);
   let lastX = 0;
@@ -565,7 +652,15 @@ function setupPointer() {
     else if (e.button === 2 || e.shiftKey || state.tool === 'orbit') mode = 'orbit';
     else mode = 'tool';
 
-    if (mode === 'tool') {
+    if (mode === 'tool' && isBoxTool()) {
+      const hit = hitAt(e);
+      if (hit) {
+        boxDrag = { anchor: hit, extent: { min: [0, 0, 0], max: [0, 0, 0] } };
+        updateBoxDrag(e);
+      } else {
+        mode = null;
+      }
+    } else if (mode === 'tool') {
       state.history.begin();
       runToolAt(e);
     } else {
@@ -576,7 +671,8 @@ function setupPointer() {
   canvas.addEventListener('pointermove', (e) => {
     if (!mode) return;
     if (mode === 'tool') {
-      runToolAt(e);
+      if (boxDrag) updateBoxDrag(e);
+      else runToolAt(e);
       return;
     }
     const dx = e.clientX - lastX;
@@ -596,7 +692,9 @@ function setupPointer() {
   });
 
   const end = (/** @type {PointerEvent} */ e) => {
-    if (mode === 'tool' && state.volume) {
+    if (mode === 'tool' && boxDrag) {
+      commitBoxDrag();
+    } else if (mode === 'tool' && state.volume) {
       // One undo step per stroke, not per voxel.
       if (state.history.commit(state.volume)) refreshHistoryButtons();
     }
@@ -865,6 +963,10 @@ function blobToBase64(blob) {
 
 // ------------------------------------------------------------------- loop
 
+/** The one checkbox drives both the viewport and the OBJ export. */
+const smoothPreviewOn = () => /** @type {HTMLInputElement} */ ($('obj-smooth')).checked;
+const relaxAmount = () => +(/** @type {HTMLInputElement} */ ($('obj-relax')).value);
+
 function nextFrame() {
   return new Promise((r) => requestAnimationFrame(() => r(undefined)));
 }
@@ -874,8 +976,14 @@ function frame() {
   if (renderer.resize(dpr)) state.dirty = true;
   if (state.geometryDirty && state.volume) {
     // Dragging a brush can touch the model dozens of times per frame; rebuild
-    // the instance buffer once instead of once per event.
+    // once instead of once per event.
     const faces = renderer.setVolume(state.volume);
+    // The voxel buffer is rebuilt either way so the face count stays honest and
+    // the grid wireframe stays in step; the smooth mesh is extra on top.
+    renderer.useSmooth = smoothPreviewOn();
+    if (renderer.useSmooth) {
+      renderer.setSmoothMesh(buildSmoothMesh(state.volume, { relax: relaxAmount() }));
+    }
     // Editing changes the voxel count, so the carve-time figure is stale.
     if (state.lastStats) state.lastStats.solid = state.volume.solidCount;
     updateStats(state.lastStats, faces);
@@ -912,6 +1020,7 @@ function applyThemeToRenderer() {
     getComputedStyle(document.documentElement).getPropertyValue('--bounds-alpha')
   );
   renderer.boundsColor = [rgb[0], rgb[1], rgb[2], Number.isFinite(alpha) ? alpha : 0.12];
+  renderer.previewColor = cssColorToGl('--accent');
   state.dirty = true;
 }
 
@@ -1027,8 +1136,14 @@ function init() {
 
   const smoothToggle = /** @type {HTMLInputElement} */ ($('obj-smooth'));
   const relaxRange = /** @type {HTMLInputElement} */ ($('obj-relax'));
-  smoothToggle.addEventListener('change', () => { relaxRange.disabled = !smoothToggle.checked; });
-  relaxRange.addEventListener('input', () => { $('relax-label').textContent = relaxRange.value; });
+  smoothToggle.addEventListener('change', () => {
+    relaxRange.disabled = !smoothToggle.checked;
+    state.geometryDirty = true;
+  });
+  relaxRange.addEventListener('input', () => {
+    $('relax-label').textContent = relaxRange.value;
+    if (smoothToggle.checked) state.geometryDirty = true;
+  });
   $('btn-save').addEventListener('click', saveProject);
   $('btn-load').addEventListener('click', () => /** @type {HTMLInputElement} */ ($('project-input')).click());
 

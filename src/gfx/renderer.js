@@ -62,6 +62,43 @@ void main() {
   fragColor = vec4(vColor.rgb, 1.0);
 }`;
 
+// The smooth mesh is ordinary indexed-free triangle soup: positions and a flat
+// normal per triangle, plus the same palette index the voxel face carried. It
+// needs its own program because voxel faces are expanded from 8 bytes in the
+// vertex shader and these are not.
+const SMOOTH_VS = `#version 300 es
+precision highp float;
+
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in float aColor;
+
+uniform mat4 uViewProj;
+uniform sampler2D uPalette;
+uniform float uShade;
+
+out vec4 vColor;
+
+void main() {
+  gl_Position = uViewProj * vec4(aPos, 1.0);
+  vec4 col = texelFetch(uPalette, ivec2(int(aColor + 0.5), 0), 0);
+
+  // Same idea as the voxel path: a readability tint only, and only in the
+  // viewport. Direction chosen so the top reads brightest, as it does there.
+  vec3 light = normalize(vec3(0.35, 1.0, 0.55));
+  float lam = max(dot(normalize(aNormal), light), 0.0);
+  vColor = vec4(col.rgb * mix(1.0, 0.55 + 0.45 * lam, uShade), col.a);
+}`;
+
+const SMOOTH_FS = `#version 300 es
+precision highp float;
+in vec4 vColor;
+out vec4 fragColor;
+void main() {
+  if (vColor.a < 0.5) discard;
+  fragColor = vec4(vColor.rgb, 1.0);
+}`;
+
 const BOX_VS = `#version 300 es
 precision highp float;
 layout(location = 0) in vec3 aPos;
@@ -92,6 +129,24 @@ export class Renderer {
     this.u = uniforms(gl, this.program, ['uViewProj', 'uPalette', 'uShade']);
     this.boxProgram = createProgram(gl, BOX_VS, BOX_FS);
     this.boxU = uniforms(gl, this.boxProgram, ['uViewProj', 'uColor']);
+    this.smoothProgram = createProgram(gl, SMOOTH_VS, SMOOTH_FS);
+    this.smoothU = uniforms(gl, this.smoothProgram, ['uViewProj', 'uPalette', 'uShade']);
+
+    this.smoothVao = gl.createVertexArray();
+    this.smoothBuffer = gl.createBuffer();
+    gl.bindVertexArray(this.smoothVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.smoothBuffer);
+    // stride 28: float3 position | float3 normal | uint8 palette index | 3 pad
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 28, 12);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2, 1, gl.UNSIGNED_BYTE, false, 28, 24);
+    gl.bindVertexArray(null);
+    this.smoothCount = 0;
+    /** Draw the smooth mesh in place of the voxel faces. */
+    this.useSmooth = false;
 
     this.vao = gl.createVertexArray();
     this.instanceBuffer = gl.createBuffer();
@@ -117,6 +172,18 @@ export class Renderer {
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
     this.boxVertexCount = 0;
+
+    // A second wireframe, for the cuboid a box drag is about to apply.
+    this.previewVao = gl.createVertexArray();
+    this.previewBuffer = gl.createBuffer();
+    gl.bindVertexArray(this.previewVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.previewBuffer);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+    this.previewVertexCount = 0;
+    /** @type {[number, number, number, number]} */
+    this.previewColor = [0.39, 0.82, 0.70, 1];
 
     this.paletteTex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, this.paletteTex);
@@ -155,16 +222,84 @@ export class Renderer {
     return count;
   }
 
+  /**
+   * Upload a smooth mesh for the viewport. Quads become triangle pairs with a
+   * flat per-triangle normal, so the shading reads the facets rather than
+   * averaging them into mush.
+   * @param {import('../export/surfacenets.js').SmoothMesh} mesh
+   * @returns {number} triangles
+   */
+  setSmoothMesh(mesh) {
+    const gl = this.gl;
+    let quadCount = 0;
+    for (const list of mesh.byMaterial.values()) quadCount += list.length;
+
+    const verticesPerQuad = 6;
+    const data = new ArrayBuffer(quadCount * verticesPerQuad * 28);
+    const f32 = new Float32Array(data);
+    const u8 = new Uint8Array(data);
+    let v = 0;
+
+    const P = mesh.verts;
+    for (const [color, list] of mesh.byMaterial) {
+      for (const quad of list) {
+        const i0 = (quad[0] - 1) * 3, i1 = (quad[1] - 1) * 3;
+        const i2 = (quad[2] - 1) * 3, i3 = (quad[3] - 1) * 3;
+        // One normal for the whole quad, from its diagonals.
+        const ax = P[i2] - P[i0], ay = P[i2 + 1] - P[i0 + 1], az = P[i2 + 2] - P[i0 + 2];
+        const bx = P[i3] - P[i1], by = P[i3 + 1] - P[i1 + 1], bz = P[i3 + 2] - P[i1 + 2];
+        let nx = ay * bz - az * by;
+        let ny = az * bx - ax * bz;
+        let nz = ax * by - ay * bx;
+        const len = Math.hypot(nx, ny, nz) || 1;
+        nx /= len; ny /= len; nz /= len;
+
+        for (const i of [i0, i1, i2, i0, i2, i3]) {
+          const o = v * 7; // 28 bytes = 7 floats
+          f32[o] = P[i];
+          f32[o + 1] = P[i + 1];
+          f32[o + 2] = P[i + 2];
+          f32[o + 3] = nx;
+          f32[o + 4] = ny;
+          f32[o + 5] = nz;
+          u8[v * 28 + 24] = color;
+          v++;
+        }
+      }
+    }
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.smoothBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
+    this.smoothCount = v;
+    return v / 3;
+  }
+
   /** Wireframe of the working grid, so the edges of the space stay visible. */
   setBounds(nx, ny, nz) {
-    const c = [[0, 0, 0], [nx, 0, 0], [nx, ny, 0], [0, ny, 0], [0, 0, nz], [nx, 0, nz], [nx, ny, nz], [0, ny, nz]];
-    const edges = [0, 1, 1, 2, 2, 3, 3, 0, 4, 5, 5, 6, 6, 7, 7, 4, 0, 4, 1, 5, 2, 6, 3, 7];
-    const data = new Float32Array(edges.length * 3);
-    edges.forEach((ci, i) => data.set(c[ci], i * 3));
     const gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.boxBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
-    this.boxVertexCount = edges.length;
+    gl.bufferData(gl.ARRAY_BUFFER, wireframe(0, 0, 0, nx, ny, nz), gl.STATIC_DRAW);
+    this.boxVertexCount = 24;
+  }
+
+  /**
+   * Outline the cuboid a box drag would apply, in inclusive voxel coordinates.
+   * @param {[number, number, number]} min
+   * @param {[number, number, number]} max
+   */
+  setPreviewBox(min, max) {
+    const gl = this.gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.previewBuffer);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      wireframe(min[0], min[1], min[2], max[0] + 1, max[1] + 1, max[2] + 1),
+      gl.DYNAMIC_DRAW
+    );
+    this.previewVertexCount = 24;
+  }
+
+  clearPreviewBox() {
+    this.previewVertexCount = 0;
   }
 
   /**
@@ -248,7 +383,17 @@ export class Renderer {
 
     const vp = camera.viewProj(w, h);
 
-    if (this.instanceCount > 0) {
+    if (this.useSmooth && this.smoothCount > 0) {
+      gl.useProgram(this.smoothProgram);
+      gl.uniformMatrix4fv(this.smoothU.uViewProj, false, vp);
+      gl.uniform1f(this.smoothU.uShade, this.shade);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.paletteTex);
+      gl.uniform1i(this.smoothU.uPalette, 0);
+      gl.bindVertexArray(this.smoothVao);
+      gl.drawArrays(gl.TRIANGLES, 0, this.smoothCount);
+      gl.bindVertexArray(null);
+    } else if (this.instanceCount > 0) {
       gl.useProgram(this.program);
       gl.uniformMatrix4fv(this.u.uViewProj, false, vp);
       gl.uniform1f(this.u.uShade, this.shade);
@@ -272,7 +417,36 @@ export class Renderer {
       gl.bindVertexArray(null);
       gl.disable(gl.BLEND);
     }
+
+    if (this.previewVertexCount > 0) {
+      // Drawn without depth testing: the cuboid usually sits partly inside the
+      // model, and an outline you can only half see is worse than none.
+      gl.disable(gl.CULL_FACE);
+      gl.disable(gl.DEPTH_TEST);
+      gl.useProgram(this.boxProgram);
+      gl.uniformMatrix4fv(this.boxU.uViewProj, false, vp);
+      gl.uniform4f(this.boxU.uColor, this.previewColor[0], this.previewColor[1], this.previewColor[2], 1);
+      gl.bindVertexArray(this.previewVao);
+      gl.drawArrays(gl.LINES, 0, this.previewVertexCount);
+      gl.bindVertexArray(null);
+      gl.enable(gl.DEPTH_TEST);
+    }
   }
+}
+
+/**
+ * The 12 edges of a box as a LINES vertex list.
+ * @returns {Float32Array} 24 vertices
+ */
+function wireframe(x0, y0, z0, x1, y1, z1) {
+  const c = [
+    [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
+    [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1],
+  ];
+  const edges = [0, 1, 1, 2, 2, 3, 3, 0, 4, 5, 5, 6, 6, 7, 7, 4, 0, 4, 1, 5, 2, 6, 3, 7];
+  const data = new Float32Array(edges.length * 3);
+  edges.forEach((ci, i) => data.set(c[ci], i * 3));
+  return data;
 }
 
 /** @param {ImageData} img @returns {ImageData} */

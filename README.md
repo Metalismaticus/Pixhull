@@ -118,7 +118,8 @@ no requantisation.
 The carve is a lattice and always will be - that is what shape-from-silhouette
 on a grid produces, and the grid size is what sets how much detail exists. But
 the exported *mesh* does not have to be cubes. Tick "smooth mesh" and the OBJ is
-built with surface nets instead: one vertex per cell the surface crosses, placed
+built with surface nets instead, and **the viewport shows it too**: one vertex
+per cell the surface crosses, placed
 at the average of the edge crossings, which turns a staircase into a rounded
 low-poly shell. A rounding slider adds Laplacian passes on top.
 
@@ -177,7 +178,7 @@ Pages serves; there is nothing to build, so the repository root is the site.
 | [`src/export/vox.js`](src/export/vox.js) | MagicaVoxel `.vox`, resolving six face colours to the one a voxel gets |
 | [`src/export/surfacenets.js`](src/export/surfacenets.js) | Smooth mesh over the same volume, with per-face colours preserved |
 | [`src/edit/pick.js`](src/edit/pick.js) | Screen ray and grid walk — a click to a voxel and a face |
-| [`src/edit/tools.js`](src/edit/tools.js) | Paint, fill, erase, add, symmetry, and face healing |
+| [`src/edit/tools.js`](src/edit/tools.js) | Paint, fill, erase, add, box, symmetry, and face healing |
 | [`src/edit/history.js`](src/edit/history.js) | Undo/redo, one step per stroke, storing only touched voxels |
 | [`src/core/serialize.js`](src/core/serialize.js) | Run-length project format so hand edits survive a save |
 
@@ -197,7 +198,7 @@ the editor exists rather than being optional.
 - [x] Mirror editing across X
 - [x] `.vox` export (MagicaVoxel)
 - [x] Smooth mesh export (surface nets)
-- [ ] A box/region tool, for reshaping a model faster than one voxel at a time
+- [x] A box tool, for reshaping a model faster than one voxel at a time
 - [ ] Selections, layers and separate parts
 - [ ] A local MCP server, so an assistant can drive the pipeline over files on disk
 - [ ] A CPU rasteriser, so that server can hand back a preview the assistant can look at

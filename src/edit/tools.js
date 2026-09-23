@@ -12,7 +12,95 @@
 
 import { DIRS } from '../core/volume.js';
 
-export const TOOLS = /** @type {const} */ (['paint', 'fill', 'erase', 'add', 'pick']);
+export const TOOLS = /** @type {const} */ (['paint', 'fill', 'erase', 'add', 'pick', 'box', 'boxErase']);
+
+/**
+ * The cuboid a box drag covers.
+ *
+ * It lives in the plane of the face you started on and extrudes along that
+ * face's normal: outward when adding, inward when removing, which is the only
+ * reading that does not surprise you. Depth comes from the brush control, so
+ * there is no extra slider for it.
+ *
+ * @param {{x: number, y: number, z: number, face: number}} anchor where the drag began
+ * @param {[number, number, number]} corner the far corner, in voxel coordinates
+ * @param {number} depth voxels along the normal, at least 1
+ * @param {boolean} outward true for add, false for erase
+ * @returns {{min: [number, number, number], max: [number, number, number]}}
+ */
+export function boxExtent(anchor, corner, depth, outward) {
+  const axis = anchor.face >> 1;
+  const n = DIRS[anchor.face];
+  const a = [anchor.x, anchor.y, anchor.z];
+
+  const min = /** @type {[number, number, number]} */ ([0, 0, 0]);
+  const max = /** @type {[number, number, number]} */ ([0, 0, 0]);
+
+  for (let i = 0; i < 3; i++) {
+    if (i === axis) continue;
+    min[i] = Math.min(a[i], corner[i]);
+    max[i] = Math.max(a[i], corner[i]);
+  }
+
+  // Adding starts one voxel outside the face; erasing starts at the face itself.
+  const start = a[axis] + (outward ? n[axis] : 0);
+  const end = start + n[axis] * (Math.max(1, depth) - 1) * (outward ? 1 : -1);
+  min[axis] = Math.min(start, end);
+  max[axis] = Math.max(start, end);
+
+  return { min, max };
+}
+
+/**
+ * @param {import('../core/volume.js').Volume} vol
+ * @param {{min: [number, number, number], max: [number, number, number]}} extent
+ * @param {{fill: boolean, color: number, symmetryX?: boolean, history?: import('./history.js').History}} opts
+ * @returns {number} voxels changed
+ */
+export function applyBox(vol, extent, opts) {
+  const h = opts.history;
+  let changed = 0;
+
+  const run = (mirror) => {
+    for (let z = extent.min[2]; z <= extent.max[2]; z++) {
+      for (let y = extent.min[1]; y <= extent.max[1]; y++) {
+        for (let x0 = extent.min[0]; x0 <= extent.max[0]; x0++) {
+          const x = mirror ? vol.nx - 1 - x0 : x0;
+          if (!vol.inBounds(x, y, z)) continue;
+          if (vol.get(x, y, z) === opts.fill) continue;
+          h?.touch(vol, x, y, z);
+          for (let d = 0; d < 6; d++) h?.touch(vol, x + DIRS[d][0], y + DIRS[d][1], z + DIRS[d][2]);
+          vol.set(x, y, z, opts.fill);
+          if (opts.fill) vol.setAllFaces(x, y, z, opts.color);
+          changed++;
+        }
+      }
+    }
+  };
+
+  run(false);
+  if (opts.symmetryX) run(true);
+
+  if (changed > 0) {
+    // The cuboid's whole neighbourhood can have gained exposed faces.
+    const centre = {
+      x: (extent.min[0] + extent.max[0]) >> 1,
+      y: (extent.min[1] + extent.max[1]) >> 1,
+      z: (extent.min[2] + extent.max[2]) >> 1,
+    };
+    const reach = Math.max(
+      extent.max[0] - extent.min[0],
+      extent.max[1] - extent.min[1],
+      extent.max[2] - extent.min[2]
+    );
+    healAround(vol, centre, (reach >> 1) + 2, opts.color, h);
+    if (opts.symmetryX) {
+      healAround(vol, { ...centre, x: vol.nx - 1 - centre.x }, (reach >> 1) + 2, opts.color, h);
+    }
+  }
+
+  return changed;
+}
 
 /**
  * @typedef {Object} ToolOptions

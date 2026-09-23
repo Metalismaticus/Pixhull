@@ -55,6 +55,27 @@ export function screenRay(camera, px, py, W, H) {
 }
 
 /**
+ * Where a ray meets an axis-aligned plane.
+ *
+ * Box dragging uses this rather than a second voxel hit: the pointer regularly
+ * leaves the model mid-drag, and the plane of the face you started on is always
+ * there to land on, so the rectangle keeps growing instead of freezing at the
+ * silhouette.
+ *
+ * @param {[number, number, number]} origin
+ * @param {[number, number, number]} dir
+ * @param {number} axis 0, 1 or 2
+ * @param {number} coord plane position along that axis
+ * @returns {[number, number, number] | null} null when the ray is parallel or points away
+ */
+export function rayPlanePoint(origin, dir, axis, coord) {
+  if (Math.abs(dir[axis]) < 1e-9) return null;
+  const t = (coord - origin[axis]) / dir[axis];
+  if (!Number.isFinite(t)) return null;
+  return [origin[0] + dir[0] * t, origin[1] + dir[1] * t, origin[2] + dir[2] * t];
+}
+
+/**
  * Slab test against the grid's bounding box.
  * @returns {[number, number] | null} entry and exit distance along the ray
  */
