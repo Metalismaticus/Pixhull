@@ -31,6 +31,7 @@ import { SourceView, VIEW_NAMES } from '../src/core/views.js';
 import { carve } from '../src/core/carve.js';
 import { exportObj } from '../src/export/obj.js';
 import { exportVox } from '../src/export/vox.js';
+import { exportGlb } from '../src/export/gltf.js';
 import { decodePng, encodePng } from './png.js';
 import { renderTurnaroundCpu, packSheetCpu } from './raster.js';
 
@@ -59,6 +60,10 @@ function safePath(p) {
   }
   return full;
 }
+
+/** Newline, as a constant: an editing pass once turned a \n escape into a real
+ *  line break inside a string literal, and the module stopped parsing. */
+const LF = String.fromCharCode(10);
 
 /** @param {unknown} err */
 const message = (err) => (err instanceof Error ? err.message : String(err));
@@ -109,17 +114,18 @@ const TOOLS = [
   {
     name: 'export_model',
     description:
-      'Write the model to disk. Formats: "obj" (OBJ + MTL), "vox" (MagicaVoxel), ' +
+      'Write the model to disk. Formats: "glb" (glTF, one material with vertex colours - ' +
+      'the easiest to drop into a game engine), "obj" (OBJ + MTL), "vox" (MagicaVoxel), ' +
       '"sprites" (a pixel-perfect turnaround sheet plus JSON metadata).',
     inputSchema: {
       type: 'object',
       properties: {
         model_id: { type: 'string' },
-        format: { type: 'string', enum: ['obj', 'vox', 'sprites'] },
+        format: { type: 'string', enum: ['glb', 'obj', 'vox', 'sprites'] },
         out_dir: { type: 'string', description: 'Directory, relative to the server root. Default ".".' },
         name: { type: 'string', description: 'Base filename. Default "pixhull".' },
-        smooth: { type: 'boolean', description: 'OBJ only: a rounded low-poly shell instead of cubes.' },
-        relax: { type: 'integer', minimum: 0, maximum: 6, description: 'OBJ smoothing passes.' },
+        smooth: { type: 'boolean', description: 'glb and obj: a rounded low-poly shell instead of cubes.' },
+        relax: { type: 'integer', minimum: 0, maximum: 6, description: 'Smoothing passes for glb and obj.' },
         directions: { type: 'integer', minimum: 1, maximum: 64, description: 'Sprites only. Default 8.' },
         elevation: { type: 'number', description: 'Sprites only, degrees. Default 26.565.' },
         scale: { type: 'integer', minimum: 1, maximum: 16, description: 'Sprites only. Default 1.' },
@@ -232,6 +238,20 @@ function toolExportModel(args) {
     writeFileSync(full, body);
     return relative(ROOT, full).replace(/\\/g, '/');
   };
+
+  if (args.format === 'glb') {
+    const { bytes, stats } = exportGlb(volume, palette, {
+      name,
+      smooth: !!args.smooth,
+      relax: args.relax ?? 0,
+    });
+    const file = write(name + '.glb', Buffer.from(bytes));
+    return text(
+      'Wrote ' + file + LF +
+      stats.triangles + ' triangles, ' + stats.vertices + ' vertices, one material with vertex ' +
+      'colours' + (stats.smooth ? ' (smooth mesh)' : '')
+    );
+  }
 
   if (args.format === 'obj') {
     const { obj, mtl, stats } = exportObj(volume, palette, {

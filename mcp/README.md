@@ -49,7 +49,7 @@ transport.
 |------|--------------|
 | `carve_views` | Takes PNG paths for any of front, back, left, right, top, bottom and carves a model. Views may be any size and need not match each other. Returns a `model_id`. |
 | `render_preview` | Renders the model and returns it **as an image**, so the assistant can see what it made and say "the roof is a row too tall" instead of guessing from a voxel count. |
-| `export_model` | Writes `obj` (+ MTL, optionally a smooth mesh), `vox` (MagicaVoxel), or `sprites` (a pixel-perfect turnaround sheet plus JSON with per-frame pivots). |
+| `export_model` | Writes `glb` (glTF — one material with vertex colours, the easiest to drop into an engine), `obj` (+ MTL), `vox` (MagicaVoxel), or `sprites` (a pixel-perfect turnaround sheet plus JSON with per-frame pivots). `glb` and `obj` can be a smooth mesh instead of cubes. |
 
 A typical exchange:
 

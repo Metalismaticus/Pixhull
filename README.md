@@ -162,6 +162,18 @@ is as wide as front and as deep as right is wide. Usually exactly one
 arrangement satisfies all three, and it says so; otherwise it falls back to
 reading order and you fix it in a click. A model carved from a sliced sheet is
 voxel-for-voxel the one you get from three separate files.
+### glTF, for engines that would rather not read 255 materials
+
+OBJ works everywhere, but it arrives as one material per palette entry, which
+is a mess to tidy up. A `.glb` carries colour as a vertex attribute instead, so
+the model is one material and one draw call, and Godot, Unity and Unreal all
+import it with no plugin.
+
+Vertices are deliberately not shared between faces: a voxel corner belongs to
+faces of different colours, and averaging them would smear the palette across
+exactly the edges the art depends on. `KHR_materials_unlit` is declared as used
+but not required, so a viewer that knows it shows the palette exactly and one
+that does not still looks right.
 ### Any image size
 
 Views do not have to be square, do not have to match each other, and do not
@@ -214,6 +226,7 @@ Pages serves; there is nothing to build, so the repository root is the site.
 | [`src/gfx/renderer.js`](src/gfx/renderer.js) | Instanced face renderer — one draw call for the whole model |
 | [`src/export/sprite.js`](src/export/sprite.js) | Turnaround rendering, sheet packing, palette snapping |
 | [`src/export/obj.js`](src/export/obj.js) | OBJ + MTL with greedy face merging (~90% fewer quads on the demo) |
+| [`src/export/gltf.js`](src/export/gltf.js) | glTF 2.0 as a single .glb, one material with vertex colours |
 | [`src/export/vox.js`](src/export/vox.js) | MagicaVoxel `.vox`, resolving six face colours to the one a voxel gets |
 | [`src/export/surfacenets.js`](src/export/surfacenets.js) | Smooth mesh over the same volume, with per-face colours preserved |
 | [`src/edit/pick.js`](src/edit/pick.js) | Screen ray and grid walk — a click to a voxel and a face |
@@ -246,7 +259,7 @@ the editor exists rather than being optional.
 - [x] A local MCP server, so an assistant can drive the pipeline over files on disk
 - [x] A CPU renderer, so that server can hand back a preview the assistant can look at
 - [ ] Expose the editing tools over MCP, so an assistant can reshape as well as carve
-- [ ] glTF/GLB export, for engines that prefer it to OBJ
+- [x] glTF/GLB export, for engines that prefer it to OBJ
 - [ ] PNG slice export (sprite stacking)
 - [ ] Per-view depth map input, to recover concavities the hull cannot
 - [ ] Animation: parts with pivots, wheel spin, sprite sheets per animation

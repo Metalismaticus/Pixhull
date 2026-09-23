@@ -13,6 +13,7 @@ import { OrthoCamera, PITCH_PRESETS, directionYaws, DEG } from './gfx/camera.js'
 import { renderTurnaround, packSheet, snapToPalette, imageDataToPng, downloadBlob } from './export/sprite.js';
 import { exportObj } from './export/obj.js';
 import { exportVox } from './export/vox.js';
+import { exportGlb } from './export/gltf.js';
 import { buildSmoothMesh } from './export/surfacenets.js';
 import { makeZip, blobBytes } from './export/zip.js';
 import { buildDemoViews } from './demo.js';
@@ -939,6 +940,21 @@ async function exportFrames() {
   }
 }
 
+async function doExportGlb() {
+  if (!state.volume) return;
+  status('status.meshing');
+  await nextFrame();
+  try {
+    const smooth = /** @type {HTMLInputElement} */ ($('obj-smooth')).checked;
+    const relax = +(/** @type {HTMLInputElement} */ ($('obj-relax')).value);
+    const { bytes, stats } = exportGlb(state.volume, state.palette, { name: 'pixhull', smooth, relax });
+    downloadBlob(new Blob([bytes], { type: 'model/gltf-binary' }), 'pixhull.glb');
+    status('status.exportedGlb', { tris: stats.triangles, verts: stats.vertices });
+  } catch (err) {
+    status('status.badImage', { err: String(err instanceof Error ? err.message : err) }, 'error');
+  }
+}
+
 async function doExportVox() {
   if (!state.volume) return;
   status('status.meshing');
@@ -1239,6 +1255,7 @@ function init() {
   $('btn-export-sheet').addEventListener('click', exportSheet);
   $('btn-export-frames').addEventListener('click', exportFrames);
   $('btn-export-obj').addEventListener('click', doExportObj);
+  $('btn-export-glb').addEventListener('click', doExportGlb);
   $('btn-export-vox').addEventListener('click', doExportVox);
 
   const sheetInput = /** @type {HTMLInputElement} */ ($('sheet-input'));

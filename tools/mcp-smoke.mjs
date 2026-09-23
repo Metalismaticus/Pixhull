@@ -174,6 +174,7 @@ try {
 
   console.log('\nexport_model');
   for (const [format, expected] of [
+    ['glb', ['car.glb']],
     ['obj', ['car.obj', 'car.mtl']],
     ['vox', ['car.vox']],
     ['sprites', ['car-sheet.png', 'car-sprites.json']],
@@ -189,6 +190,15 @@ try {
       check(format + ' wrote ' + file, existsSync(full) && statSync(full).size > 0,
         existsSync(full) ? statSync(full).size + ' bytes' : 'missing');
     }
+  }
+  {
+    const glb = readFileSync(join(work, 'out', 'car.glb'));
+    check('glb starts with the glTF magic', glb.toString('ascii', 0, 4) === 'glTF');
+    check('glb declares its own length', glb.readUInt32LE(8) === glb.length, glb.length + ' bytes');
+    const jsonLen = glb.readUInt32LE(12);
+    const doc = JSON.parse(glb.toString('utf8', 20, 20 + jsonLen));
+    check('glb carries vertex colours', !!doc.meshes[0].primitives[0].attributes.COLOR_0);
+    check('glb has exactly one material', doc.materials.length === 1);
   }
   {
     const meta = JSON.parse(readFileSync(join(work, 'out', 'car-sprites.json'), 'utf8'));

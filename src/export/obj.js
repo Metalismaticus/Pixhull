@@ -58,16 +58,7 @@ function exportSmooth(volume, palette, opts) {
   const scale = opts.scale ?? 1;
   const { verts, byMaterial, quads } = buildSmoothMesh(volume, { relax: opts.relax });
 
-  const origin = [0, 0, 0];
-  if (opts.center !== false) {
-    const b = volume.bounds();
-    if (b) {
-      origin[0] = (b.min[0] + b.max[0] + 1) / 2;
-      origin[1] = b.min[1];
-      origin[2] = (b.min[2] + b.max[2] + 1) / 2;
-    }
-  }
-  const placed = verts.map((v, i) => (v - origin[i % 3]) * scale);
+  const placed = placeVertices(verts, volume, opts.center !== false, scale);
 
   return {
     ...writeObj(placed, byMaterial, palette, name),
@@ -84,10 +75,26 @@ function exportSmooth(volume, palette, opts) {
 function exportBlocky(volume, palette, opts = {}) {
   const name = opts.name ?? 'pixhull';
   const scale = opts.scale ?? 1;
-  const dims = [volume.nx, volume.ny, volume.nz];
+  const mesh = buildBlockyMesh(volume);
+  const placed = placeVertices(mesh.verts, volume, opts.center !== false, scale);
+  return {
+    ...writeObj(placed, mesh.byMaterial, palette, name),
+    stats: { quads: mesh.quads, rawQuads: mesh.rawQuads, vertices: placed.length / 3, smooth: false },
+  };
+}
 
+/**
+ * Shift a mesh onto its origin and scale it. Centred on the model's footprint
+ * with its feet on y = 0, which is what an engine expects to drop into a scene.
+ * @param {number[]} verts voxel units
+ * @param {import('../core/volume.js').Volume} volume
+ * @param {boolean} center
+ * @param {number} scale
+ * @returns {number[]}
+ */
+export function placeVertices(verts, volume, center, scale) {
   const origin = [0, 0, 0];
-  if (opts.center !== false) {
+  if (center) {
     const b = volume.bounds();
     if (b) {
       origin[0] = (b.min[0] + b.max[0] + 1) / 2;
@@ -95,6 +102,19 @@ function exportBlocky(volume, palette, opts = {}) {
       origin[2] = (b.min[2] + b.max[2] + 1) / 2;
     }
   }
+  return verts.map((v, i) => (v - origin[i % 3]) * scale);
+}
+
+/**
+ * Greedy-merged geometry: the largest rectangle of identically-coloured,
+ * identically-facing quads becomes one quad. Same shape of result as
+ * buildSmoothMesh, so the writers downstream do not care which produced it.
+ *
+ * @param {import('../core/volume.js').Volume} volume
+ * @returns {{verts: number[], byMaterial: Map<number, number[][]>, quads: number, rawQuads: number}}
+ */
+export function buildBlockyMesh(volume) {
+  const dims = [volume.nx, volume.ny, volume.nz];
 
   /** @type {number[]} flat xyz */
   const verts = [];
@@ -110,7 +130,7 @@ function exportBlocky(volume, palette, opts = {}) {
     const key = p[0] + ',' + p[1] + ',' + p[2];
     let id = vertIndex.get(key);
     if (id === undefined) {
-      verts.push((p[0] - origin[0]) * scale, (p[1] - origin[1]) * scale, (p[2] - origin[2]) * scale);
+      verts.push(p[0], p[1], p[2]);
       id = verts.length / 3;
       vertIndex.set(key, id);
     }
@@ -185,10 +205,7 @@ function exportBlocky(volume, palette, opts = {}) {
     }
   }
 
-  return {
-    ...writeObj(verts, byMaterial, palette, name),
-    stats: { quads, rawQuads, vertices: verts.length / 3, smooth: false },
-  };
+  return { verts, byMaterial, quads, rawQuads };
 }
 
 /**
