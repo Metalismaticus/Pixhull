@@ -24,3 +24,22 @@ export async function decodeImage(blob) {
   bmp.close();
   return ctx.getImageData(0, 0, canvas.width, canvas.height);
 }
+
+/**
+ * Promote a plain {width, height, data} to a real ImageData.
+ *
+ * The core deals in the plain shape so it can run under Node, but canvas APIs
+ * accept nothing else: putImageData throws on a look-alike object. Sheet
+ * slicing produces the plain shape, so every canvas path has to come through
+ * here.
+ *
+ * @param {ImageData | {width: number, height: number, data: Uint8ClampedArray|Uint8Array}} image
+ * @returns {ImageData}
+ */
+export function toImageData(image) {
+  if (typeof ImageData !== 'undefined' && image instanceof ImageData) return image;
+  const data = image.data instanceof Uint8ClampedArray
+    ? image.data
+    : new Uint8ClampedArray(image.data);
+  return new ImageData(data, image.width, image.height);
+}

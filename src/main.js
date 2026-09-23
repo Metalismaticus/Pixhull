@@ -5,7 +5,7 @@
 
 import { Palette } from './core/palette.js';
 import { SourceView, VIEW_NAMES, suggestGridSize } from './core/views.js';
-import { decodeImage } from './ui/decode.js';
+import { decodeImage, toImageData } from './ui/decode.js';
 import { carve } from './core/carve.js';
 import { detectCells, cropCell, guessViews } from './core/sheet.js';
 import { Renderer } from './gfx/renderer.js';
@@ -214,7 +214,7 @@ function drawThumb(ctx, view, w, h) {
   tmp.height = src.height;
   const tctx = tmp.getContext('2d');
   if (!tctx) return;
-  tctx.putImageData(src, 0, 0);
+  tctx.putImageData(toImageData(src), 0, 0);
   if (view.flipH || view.flipV) {
     const flipped = document.createElement('canvas');
     flipped.width = src.width;
@@ -467,7 +467,7 @@ function refreshSheetCells() {
     const ctx = canvas.getContext('2d');
     if (ctx && sheet) {
       const crop = cropCell(sheet.image, cell);
-      ctx.putImageData(new ImageData(crop.data, crop.width, crop.height), 0, 0);
+      ctx.putImageData(toImageData(crop), 0, 0);
     }
 
     const size = document.createElement('span');
@@ -988,7 +988,7 @@ async function saveProject() {
   /** @type {Record<string, unknown>} */
   const views = {};
   for (const [name, v] of state.views) {
-    const blob = await imageDataToPng(v.image);
+    const blob = await imageDataToPng(toImageData(v.image));
     views[name] = {
       png: await blobToBase64(blob),
       flipH: v.flipH,
