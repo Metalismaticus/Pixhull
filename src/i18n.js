@@ -112,6 +112,7 @@ const STRINGS = {
 
     'status.ready': 'ready',
     'status.built': 'Built {n} voxels in {ms} ms',
+    'status.lookalikeViews': 'The {a} and {b} drawings are {pct}% the same shape, but they should be looking at different sides. One of them is in the wrong slot — skip it, or move it.',
     'status.viewsDisagree': 'Built {n} voxels — the {view} view had to be stretched {amount}× to agree with the others. The drawings do not share their axes, so the shape is approximate.',
     'status.builtMirrored': 'Built {n} voxels in {ms} ms · mirrored: {views}',
     'status.emptyCarve': 'Carved nothing — the views may not overlap. Try flipping a view, or check the alpha channel.',
@@ -296,6 +297,7 @@ const STRINGS = {
 
     'status.ready': 'готов',
     'status.built': 'Собрано {n} вокселей за {ms} мс',
+    'status.lookalikeViews': 'Рисунки «{a}» и «{b}» совпадают по форме на {pct}%, хотя должны смотреть с разных сторон. Один из них не в том слоте — пропустите его или переставьте.',
     'status.viewsDisagree': 'Собрано {n} вокселей — вид «{view}» пришлось растянуть в {amount}×, чтобы он сошёлся с остальными. Рисунки не согласованы по осям, так что форма приблизительная.',
     'status.builtMirrored': 'Собрано {n} вокселей за {ms} мс · отзеркалено: {views}',
     'status.emptyCarve': 'Ничего не вырезалось — виды могут не пересекаться. Попробуйте отразить вид или проверьте альфа-канал.',

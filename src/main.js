@@ -295,16 +295,26 @@ function build() {
   updateFramePreview();
   state.dirty = true;
 
+  // Ordered by how badly each one invalidates the result. A drawing in the
+  // wrong slot makes the whole model meaningless; running out of palette
+  // entries only makes it slightly off-colour.
   if (volume.solidCount === 0) {
     status('status.emptyCarve', undefined, 'warn');
-  } else if (state.palette.overflowed) {
-    status('status.paletteOverflow', { ms: stats.ms.toFixed(0) }, 'warn');
+  } else if (stats.lookalikes.length > 0) {
+    const worst = stats.lookalikes[0];
+    status('status.lookalikeViews', {
+      a: ['views.' + worst.a],
+      b: ['views.' + worst.b],
+      pct: Math.round(worst.similarity * 100),
+    }, 'warn');
   } else if (state.worstFit.amount > 1.1 && state.worstFit.name) {
     status('status.viewsDisagree', {
       n: volume.solidCount,
       view: ['views.' + state.worstFit.name],
       amount: state.worstFit.amount.toFixed(2),
     }, 'warn');
+  } else if (state.palette.overflowed) {
+    status('status.paletteOverflow', { ms: stats.ms.toFixed(0) }, 'warn');
   } else if (stats.mirrored.length > 0) {
     status('status.builtMirrored', {
       n: volume.solidCount,

@@ -17,6 +17,7 @@
 
 import { Volume, DIRS } from './volume.js';
 import { VIEW_GEOM, VIEW_NAMES } from './views.js';
+import { findLookalikeViews } from './diagnose.js';
 
 /** Which view looks at the opposite side of the model. */
 const OPPOSITE = {
@@ -46,6 +47,9 @@ const MIRROR_AXIS = {
  * @property {number} inferred faces that had to borrow a colour
  * @property {string[]} mirrored views synthesised from their opposite
  * @property {number} ms wall-clock time
+ * @property {Array<{a: string, b: string, similarity: number}>} lookalikes views
+ *   that span different axes yet show the same silhouette, which means one of
+ *   them is the wrong drawing for its slot
  */
 
 /**
@@ -70,8 +74,12 @@ export function carve(views, N, palette, opts = {}) {
 
   const vol = Volume.cube(N);
   if (active.length === 0) {
-    return { volume: vol, stats: { solid: 0, painted: 0, inferred: 0, mirrored: [], ms: 0 } };
+    return { volume: vol, stats: { solid: 0, painted: 0, inferred: 0, mirrored: [], lookalikes: [], ms: 0 } };
   }
+
+  // Before mirroring: a synthesised view is a copy of its opposite by
+  // construction, and comparing against it would only ever confirm that.
+  const lookalikes = findLookalikeViews(raster, N);
 
   const mFront = raster.front?.mask;
   const mBack = raster.back?.mask;
@@ -120,7 +128,14 @@ export function carve(views, N, palette, opts = {}) {
 
   return {
     volume: vol,
-    stats: { solid: vol.solidCount, painted, inferred, mirrored, ms: performance.now() - t0 },
+    stats: {
+      solid: vol.solidCount,
+      painted,
+      inferred,
+      mirrored,
+      lookalikes,
+      ms: performance.now() - t0,
+    },
   };
 }
 

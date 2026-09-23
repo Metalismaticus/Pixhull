@@ -195,6 +195,22 @@ voxel on whole-cell offsets. Resampling a 12-pixel wing to 13 cells would add
 a column the artist never drew. Verified both ways: the demo is unchanged at
 1,438 voxels, and consistent art upscaled 8× or 37× then reduced back carves
 the identical model.
+### Telling you when a sheet cannot work
+
+Shape-from-silhouette fails silently and expensively. Put a drawing in the
+front slot that is really a second top view and the carve still runs, still
+reports a voxel count, and hands back a solid block of debris. Nothing in the
+numbers says why, so the natural conclusion is that the tool is broken.
+
+It is checkable, though. Views spanning different axis pairs should not look
+alike — front spans (x, y) and top spans (x, z) — so if their silhouettes
+match, the same drawing is in both slots. Opposite views are expected to match
+and are exempt. Each silhouette is normalised into a 32×32 stamp of its own
+bounding box first, so aspect and placement cannot disguise the match.
+
+On a real sheet whose bottom two drawings were three-quarter beauty shots
+rather than projections, top vs front scored 0.79 and top vs back 0.81,
+against 0.52 for the genuine side view. The status bar now names the pair.
 ### Any image size
 
 Views do not have to be square, do not have to match each other, and do not
@@ -242,6 +258,7 @@ Pages serves; there is nothing to build, so the repository root is the site.
 | [`src/core/volume.js`](src/core/volume.js) | Sparse 16³-chunked voxel storage, occupancy bitset + 6 palette bytes per voxel |
 | [`src/core/carve.js`](src/core/carve.js) | Silhouette intersection and per-face colour transfer |
 | [`src/core/views.js`](src/core/views.js) | Source images, trimming, placement, the view↔axis convention |
+| [`src/core/diagnose.js`](src/core/diagnose.js) | Spotting a drawing that is in the wrong slot, by silhouette |
 | [`src/core/sheet.js`](src/core/sheet.js) | Slicing one reference sheet into views, and naming them by size |
 | [`src/gfx/camera.js`](src/gfx/camera.js) | Orthographic camera and the pixel-clean angle maths |
 | [`src/gfx/renderer.js`](src/gfx/renderer.js) | Instanced face renderer — one draw call for the whole model |
