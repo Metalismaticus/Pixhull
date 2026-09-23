@@ -179,6 +179,8 @@ the editor exists rather than being optional.
 - [ ] Engine metadata presets (Godot, Unity, GameMaker, RPG Maker)
 - [ ] Desktop build via Tauri
 - [ ] An MCP server over the same core, so an assistant can hand it views and get a model back
+- [ ] A box/region tool, for reshaping a model faster than one voxel at a time
+- [ ] An import map, so a deploy can never serve a new page against cached older modules
 
 ## Licence
 
