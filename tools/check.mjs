@@ -28,8 +28,16 @@ async function walk(dir) {
   return out;
 }
 
-const files = [...(await walk(join(root, 'src'))), ...(await walk(join(root, 'tools')))]
-  .filter((f) => !f.endsWith('check.mjs') && !f.endsWith('serve.mjs'));
+// Entry points are excluded: importing them runs them. The server would sit
+// waiting on stdin and the smoke test would launch a second server; both are
+// covered by tools/mcp-smoke.mjs instead.
+const ENTRY_POINTS = ['check.mjs', 'serve.mjs', 'mcp-smoke.mjs', 'server.js'];
+
+const files = [
+  ...(await walk(join(root, 'src'))),
+  ...(await walk(join(root, 'tools'))),
+  ...(await walk(join(root, 'mcp'))),
+].filter((f) => !ENTRY_POINTS.some((e) => f.endsWith(e)));
 
 let failed = 0;
 for (const file of files) {

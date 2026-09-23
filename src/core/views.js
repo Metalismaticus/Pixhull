@@ -2,6 +2,11 @@
 /**
  * Source views: the up-to-six orthographic images the model is carved from.
  *
+ * Deliberately free of the DOM. An image arrives as plain {width, height,
+ * data} in RGBA8, whether a browser decoded it or Node did, so the carve runs
+ * identically in the page and in the MCP server - one implementation, not two
+ * that have to agree.
+ *
  * Deliberately permissive about size. Art arrives at 50x48 or 37x91, from
  * whatever canvas the artist was already working in, and the tool's job is to
  * place it on the voxel grid - not to send the artist back to resize things.
@@ -37,7 +42,7 @@ export const ALPHA_THRESHOLD = 128;
 export class SourceView {
   /**
    * @param {string} name one of VIEW_NAMES
-   * @param {ImageData} image
+   * @param {{width: number, height: number, data: Uint8ClampedArray|Uint8Array}} image RGBA8
    */
   constructor(name, image) {
     this.name = name;
@@ -126,24 +131,6 @@ export class SourceView {
     }
     return { mask, color };
   }
-}
-
-/**
- * Decode a File/Blob into ImageData with no smoothing anywhere along the path.
- * @param {Blob} blob
- * @returns {Promise<ImageData>}
- */
-export async function decodeImage(blob) {
-  const bmp = await createImageBitmap(blob, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' });
-  const canvas = document.createElement('canvas');
-  canvas.width = bmp.width;
-  canvas.height = bmp.height;
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  if (!ctx) throw new Error('2D canvas unavailable');
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(bmp, 0, 0);
-  bmp.close();
-  return ctx.getImageData(0, 0, canvas.width, canvas.height);
 }
 
 /**

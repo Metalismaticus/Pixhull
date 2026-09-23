@@ -11,8 +11,7 @@
  * whole-pixel offset so nothing shimmers as it turns.
  */
 
-import { directionYaws } from '../gfx/camera.js';
-import { transformPoint } from '../gfx/glutil.js';
+import { planTurnaround } from './turnaround.js';
 
 /**
  * @typedef {Object} TurnaroundOptions
@@ -43,75 +42,19 @@ import { transformPoint } from '../gfx/glutil.js';
  * @returns {TurnaroundResult}
  */
 export function renderTurnaround(renderer, volume, camera, opts) {
-  const scale = Math.max(1, Math.round(opts.scale ?? 1));
-  const padding = Math.max(0, Math.round(opts.padding ?? 0));
-  const angleMode = opts.angleMode ?? 'clean';
-
-  const box = opts.useGridBounds
-    ? { min: /** @type {[number,number,number]} */ ([0, 0, 0]),
-        max: /** @type {[number,number,number]} */ ([volume.nx - 1, volume.ny - 1, volume.nz - 1]) }
-    : volume.bounds();
-  if (!box) throw new Error('Nothing to export: the model is empty.');
-
-  const yaws = directionYaws(opts.directions, angleMode);
-
-  camera.pitch = opts.pitch;
-  camera.pixelsPerVoxel = scale;
-  camera.target = [
-    (box.min[0] + box.max[0] + 1) / 2,
-    (box.min[1] + box.max[1] + 1) / 2,
-    (box.min[2] + box.max[2] + 1) / 2,
-  ];
-
-  // Pass one: find the frame size that fits every angle. Doing this before
-  // rendering anything is what keeps the sheet aligned.
-  let maxW = 0;
-  let maxH = 0;
-  const extents = [];
-  for (const yaw of yaws) {
-    camera.yaw = yaw;
-    camera.panX = 0;
-    camera.panY = 0;
-    const e = camera.projectedExtent(box);
-    extents.push(e);
-    if (e.w > maxW) maxW = e.w;
-    if (e.h > maxH) maxH = e.h;
-  }
-
-  const frameW = opts.frameW ?? Math.ceil(maxW * scale) + padding * 2;
-  const frameH = opts.frameH ?? Math.ceil(maxH * scale) + padding * 2;
+  const plan = planTurnaround(volume, camera, opts);
 
   const prevShade = renderer.shade;
   renderer.shade = opts.shaded ? 1 : 0;
 
   /** @type {ImageData[]} */
   const frames = [];
-  /** @type {Array<{x: number, y: number}>} */
-  const pivots = [];
-
   try {
-    for (let i = 0; i < yaws.length; i++) {
-      camera.yaw = yaws[i];
-      // Whole-pixel centring: the fractional part would otherwise differ per
-      // frame and make edges crawl during playback.
-      camera.panX = -Math.round(extents[i].cx * scale);
-      camera.panY = -Math.round(extents[i].cy * scale);
-      frames.push(renderer.renderToImageData(camera, frameW, frameH));
-
-      // Pivot = the model's ground centre, which is what an engine anchors to.
-      const view = camera.viewMatrix();
-      const p = transformPoint(
-        view,
-        (box.min[0] + box.max[0] + 1) / 2,
-        box.min[1],
-        (box.min[2] + box.max[2] + 1) / 2
-      );
-      const ox = camera.panX / scale;
-      const oy = camera.panY / scale;
-      pivots.push({
-        x: Math.round(frameW / 2 + (p[0] + ox) * scale),
-        y: Math.round(frameH / 2 - (p[1] + oy) * scale),
-      });
+    for (const shot of plan.shots) {
+      camera.yaw = shot.yaw;
+      camera.panX = shot.panX;
+      camera.panY = shot.panY;
+      frames.push(renderer.renderToImageData(camera, plan.frameW, plan.frameH));
     }
   } finally {
     renderer.shade = prevShade;
@@ -120,17 +63,16 @@ export function renderTurnaround(renderer, volume, camera, opts) {
   return {
     frames,
     meta: {
-      frameW,
-      frameH,
+      frameW: plan.frameW,
+      frameH: plan.frameH,
       count: frames.length,
-      angles: yaws.map((y) => +((y * 180) / Math.PI).toFixed(4)),
-      pivots,
-      pitch: +((opts.pitch * 180) / Math.PI).toFixed(4),
-      scale,
+      angles: plan.shots.map((s) => +((s.yaw * 180) / Math.PI).toFixed(4)),
+      pivots: plan.shots.map((s) => ({ x: s.pivotX, y: s.pivotY })),
+      pitch: +((plan.pitch * 180) / Math.PI).toFixed(4),
+      scale: plan.scale,
     },
   };
 }
-
 /**
  * Lay frames out in a grid. Defaults to a single row, which is what most
  * engines expect from a turnaround strip.

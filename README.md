@@ -130,6 +130,22 @@ quads, 1,086 vertices, every edge used exactly twice. It is higher-poly than the
 greedy-merged blocky export (98 quads), because surface nets does not merge
 coplanar faces.
 
+### Driving it from an assistant
+
+An MCP server ships alongside the app in [`mcp/`](mcp/README.md). Point an
+assistant at a folder of PNGs and it can carve a model, **look at what it
+made**, and export OBJ, `.vox` or a sprite sheet — locally, over files on
+disk, with no hosting and no account.
+
+It runs the same modules as the page rather than a port of them, so the two
+cannot drift: from the same three PNGs both produce 1,438 voxels and 25×20
+frames. Node has no WebGL, so previews are drawn on the CPU by casting one ray
+per pixel through the same grid walk the editor uses for picking — the camera
+is orthographic and the geometry is a grid, so that gives exactly what the GPU
+would.
+
+No dependencies there either: PNG decoding leans on the zlib already in Node,
+and the protocol is JSON-RPC over stdio, written directly.
 ### Any image size
 
 Views do not have to be square, do not have to match each other, and do not
@@ -157,6 +173,12 @@ node tools/check.mjs
 This imports each one rather than running `node --check`, which once accepted a
 string literal broken across two lines that the browser rejected outright.
 
+To exercise the MCP server end to end:
+
+```bash
+node tools/mcp-smoke.mjs
+```
+
 ## Deploy
 
 Push to `main`. The included workflow mirrors it to `gh-pages`, which is what
@@ -181,6 +203,10 @@ Pages serves; there is nothing to build, so the repository root is the site.
 | [`src/edit/tools.js`](src/edit/tools.js) | Paint, fill, erase, add, box, symmetry, and face healing |
 | [`src/edit/history.js`](src/edit/history.js) | Undo/redo, one step per stroke, storing only touched voxels |
 | [`src/core/serialize.js`](src/core/serialize.js) | Run-length project format so hand edits survive a save |
+| [`src/export/turnaround.js`](src/export/turnaround.js) | Frame planning shared by the browser and the MCP server |
+| [`mcp/server.js`](mcp/server.js) | The MCP server: JSON-RPC over stdio, no SDK, no dependencies |
+| [`mcp/png.js`](mcp/png.js) | PNG decode and encode for Node, on the built-in zlib |
+| [`mcp/raster.js`](mcp/raster.js) | CPU rendering, one ray per pixel through the editor's own grid walk |
 
 ### Known limits of the approach
 
@@ -200,8 +226,9 @@ the editor exists rather than being optional.
 - [x] Smooth mesh export (surface nets)
 - [x] A box tool, for reshaping a model faster than one voxel at a time
 - [ ] Selections, layers and separate parts
-- [ ] A local MCP server, so an assistant can drive the pipeline over files on disk
-- [ ] A CPU rasteriser, so that server can hand back a preview the assistant can look at
+- [x] A local MCP server, so an assistant can drive the pipeline over files on disk
+- [x] A CPU renderer, so that server can hand back a preview the assistant can look at
+- [ ] Expose the editing tools over MCP, so an assistant can reshape as well as carve
 - [ ] glTF/GLB export, for engines that prefer it to OBJ
 - [ ] PNG slice export (sprite stacking)
 - [ ] Per-view depth map input, to recover concavities the hull cannot

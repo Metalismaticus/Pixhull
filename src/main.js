@@ -4,7 +4,8 @@
  */
 
 import { Palette } from './core/palette.js';
-import { SourceView, VIEW_NAMES, decodeImage, suggestGridSize } from './core/views.js';
+import { SourceView, VIEW_NAMES, suggestGridSize } from './core/views.js';
+import { decodeImage } from './ui/decode.js';
 import { carve } from './core/carve.js';
 import { Renderer } from './gfx/renderer.js';
 import { OrthoCamera, PITCH_PRESETS, directionYaws, DEG } from './gfx/camera.js';

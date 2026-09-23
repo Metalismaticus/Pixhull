@@ -40,5 +40,10 @@ jobs:
       - name: Check every module parses
         run: node tools/check.mjs
 
+      # Drives the MCP server over stdio end to end. It shares its core with
+      # the web app, so this also catches a break in the carve or the exporters.
+      - name: Check the MCP server end to end
+        run: node tools/mcp-smoke.mjs
+
       - name: Mirror main to gh-pages
         run: git push origin HEAD:gh-pages
