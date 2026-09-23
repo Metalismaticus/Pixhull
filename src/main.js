@@ -22,6 +22,7 @@ import { detectTheme, getTheme, setTheme, toggleTheme, cssColorToGl } from './ui
 import { screenRay, raycastVoxel, rayPlanePoint } from './edit/pick.js';
 import { History } from './edit/history.js';
 import { applyTool, boxExtent, applyBox } from './edit/tools.js';
+import { strokeSamples, strokeStepPx } from './edit/stroke.js';
 import { serializeVolume, deserializeVolume } from './core/serialize.js';
 
 /** @param {string} id */
@@ -683,22 +684,58 @@ function refreshHistoryButtons() {
  * @param {PointerEvent} e
  */
 function hitAt(e) {
-  if (!state.volume) return null;
+  const [sx, sy] = canvasPoint(e);
+  return hitAtPoint(sx, sy);
+}
+
+/**
+ * Pointer position in drawing-buffer pixels, which is the space rays are cast
+ * in and the space a stroke is resampled in.
+ * @param {{clientX: number, clientY: number}} e
+ * @returns {[number, number]}
+ */
+function canvasPoint(e) {
   const rect = canvas.getBoundingClientRect();
-  const sx = ((e.clientX - rect.left) / rect.width) * canvas.width;
-  const sy = ((e.clientY - rect.top) / rect.height) * canvas.height;
+  return [
+    ((e.clientX - rect.left) / rect.width) * canvas.width,
+    ((e.clientY - rect.top) / rect.height) * canvas.height,
+  ];
+}
+
+/**
+ * @param {number} sx @param {number} sy drawing-buffer pixels
+ * @returns {{x: number, y: number, z: number, face: number} | null}
+ */
+function hitAtPoint(sx, sy) {
+  if (!state.volume) return null;
   const ray = screenRay(camera, sx, sy, canvas.width, canvas.height);
   return raycastVoxel(state.volume, ray.origin, ray.dir);
 }
 
 /**
- * @param {PointerEvent} e
+ * @param {number} sx @param {number} sy drawing-buffer pixels
  * @returns {boolean} true when the model was touched
  */
-function runToolAt(e) {
+function runToolAtPoint(sx, sy) {
   if (!state.volume || state.tool === 'orbit') return false;
-  const hit = hitAt(e);
+  const hit = hitAtPoint(sx, sy);
   if (!hit) return false;
+
+  // Resampling a drag produces many samples per voxel on purpose - that is what
+  // stops the stroke breaking up. Applying the tool at every one of them would
+  // be repeating work on a face already done, so consecutive samples that land
+  // on the same face collapse into one application.
+  //
+  // This is thrift, not a safeguard, and it is not one application per stroke:
+  // a drag still applies once per face it crosses, which for fill is more
+  // applications than the one-per-event the product did before. Measured on a
+  // solid 128-cube - `tests/edit/fill-drag.mjs` - a 720 px fill drag is 1501
+  // samples, 168 applications and around 60 ms, because `fillSurface` returns
+  // at its first line once the surface already wears the new colour. What keeps
+  // that cheap is the early return, not this line.
+  const key = ((hit.x * state.volume.ny + hit.y) * state.volume.nz + hit.z) * 6 + hit.face;
+  if (key === strokeLastHit) return true;
+  strokeLastHit = key;
 
   if (state.tool === 'pick') {
     const picked = state.volume.getFace(hit.x, hit.y, hit.z, hit.face);
@@ -749,6 +786,25 @@ function redo() {
  * @type {{anchor: {x: number, y: number, z: number, face: number}, extent: {min: [number,number,number], max: [number,number,number]}} | null}
  */
 let boxDrag = null;
+
+/**
+ * The voxel face the current stroke touched last, as a packed index.
+ *
+ * Cleared when a stroke starts, so a new stroke over the same spot applies
+ * again; within a stroke it collapses a run of samples that land on one face
+ * into one application. Only the last face, deliberately: a stroke that leaves
+ * a face and comes back to it is meant to apply there again, and remembering
+ * every face a long drag touched would be the larger cost.
+ * @type {number | null}
+ */
+let strokeLastHit = null;
+
+/**
+ * Where the pointer was when the tool last ran, in drawing-buffer pixels.
+ * The gap between this and the next event is what gets filled in.
+ * @type {[number, number] | null}
+ */
+let strokeLastPoint = null;
 
 const isBoxTool = () => state.tool === 'box' || state.tool === 'boxErase';
 
@@ -828,6 +884,44 @@ function commitBoxDrag() {
     state.history.commit(state.volume);
   }
 }
+
+/**
+ * Carry the stroke from where the tool last ran to where the pointer is now.
+ *
+ * A browser delivers at most one pointermove per frame and throws the
+ * positions in between away; `getCoalescedEvents` hands those back, and
+ * whatever gap is left between two consecutive positions is filled by
+ * resampling the straight line between them. Both halves run inside the stroke
+ * that pointerdown opened, so a mended stroke is still one undo step.
+ *
+ * @param {PointerEvent} e
+ */
+function continueStroke(e) {
+  /** @type {Array<[number, number]>} */
+  const points = [];
+  const coalesced = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : null;
+  if (coalesced && coalesced.length > 0) {
+    for (const c of coalesced) points.push(canvasPoint(c));
+  }
+  const now = canvasPoint(e);
+  const last = points[points.length - 1];
+  // Not every engine ends the coalesced list with the event itself; the
+  // position the pointer is actually at has to be the one the stroke ends on.
+  if (!last || last[0] !== now[0] || last[1] !== now[1]) points.push(now);
+
+  const stepPx = strokeStepPx(camera.pixelsPerVoxel);
+  for (const p of points) {
+    if (strokeLastPoint) {
+      for (const [sx, sy] of strokeSamples(strokeLastPoint[0], strokeLastPoint[1], p[0], p[1], stepPx)) {
+        runToolAtPoint(sx, sy);
+      }
+    } else {
+      runToolAtPoint(p[0], p[1]);
+    }
+    strokeLastPoint = p;
+  }
+}
+
 function setupPointer() {
   let mode = /** @type {null | 'orbit' | 'pan' | 'tool'} */ (null);
   let lastX = 0;
@@ -859,7 +953,9 @@ function setupPointer() {
       }
     } else if (mode === 'tool') {
       state.history.begin();
-      runToolAt(e);
+      strokeLastHit = null;
+      strokeLastPoint = canvasPoint(e);
+      runToolAtPoint(strokeLastPoint[0], strokeLastPoint[1]);
     } else {
       canvas.classList.add('dragging');
     }
@@ -869,7 +965,7 @@ function setupPointer() {
     if (!mode) return;
     if (mode === 'tool') {
       if (boxDrag) updateBoxDrag(e);
-      else runToolAt(e);
+      else continueStroke(e);
       return;
     }
     const dx = e.clientX - lastX;
@@ -896,6 +992,8 @@ function setupPointer() {
       if (state.history.commit(state.volume)) refreshHistoryButtons();
     }
     mode = null;
+    strokeLastPoint = null;
+    strokeLastHit = null;
     canvas.classList.remove('dragging');
     try {
       if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
