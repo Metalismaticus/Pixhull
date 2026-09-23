@@ -10,8 +10,13 @@
 
 const STORAGE_KEY = 'pixhull.lang';
 
-/** @type {Record<string, Record<string, string>>} */
-const STRINGS = {
+/**
+ * Exported so `tests/i18n/parity.mjs` can count the keys of each language.
+ * A key added to one language and forgotten in the other is a defect, and
+ * counting it is the only way to catch it before a reader does.
+ * @type {Record<string, Record<string, string>>}
+ */
+export const STRINGS = {
   en: {
     'app.tagline': 'front / side / top → voxels → sprites',
     'app.loadDemo': 'Load demo',
