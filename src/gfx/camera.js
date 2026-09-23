@@ -26,14 +26,15 @@ export const PITCH_ISO_2_1 = Math.atan(0.5);
 /** True isometric - all three axes equally foreshortened, but jagged in pixels. */
 export const PITCH_ISO_TRUE = Math.atan(1 / Math.SQRT2);
 
+/** `key` is an i18n lookup; this module stays free of UI strings. */
 export const PITCH_PRESETS = [
-  { id: 'iso21', label: '2:1 dimetric (pixel-clean)', pitch: PITCH_ISO_2_1 },
-  { id: 'isoTrue', label: 'True isometric 35.26°', pitch: PITCH_ISO_TRUE },
-  { id: 'deg30', label: '30° (RPG Maker-ish)', pitch: 30 * DEG },
-  { id: 'deg45', label: '45°', pitch: 45 * DEG },
-  { id: 'deg60', label: '60°', pitch: 60 * DEG },
-  { id: 'top', label: '90° top-down', pitch: 89.999 * DEG },
-  { id: 'side', label: '0° side-on', pitch: 0 },
+  { id: 'iso21', key: 'pitch.iso21', pitch: PITCH_ISO_2_1 },
+  { id: 'isoTrue', key: 'pitch.isoTrue', pitch: PITCH_ISO_TRUE },
+  { id: 'deg30', key: 'pitch.deg30', pitch: 30 * DEG },
+  { id: 'deg45', key: 'pitch.deg45', pitch: 45 * DEG },
+  { id: 'deg60', key: 'pitch.deg60', pitch: 60 * DEG },
+  { id: 'top', key: 'pitch.top', pitch: 89.999 * DEG },
+  { id: 'side', key: 'pitch.side', pitch: 0 },
 ];
 
 /**

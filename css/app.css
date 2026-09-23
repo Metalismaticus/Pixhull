@@ -1,17 +1,51 @@
+/* Dark is the default. Every colour is a token, including --viewport-bg, which
+   the WebGL canvas reads back out of the stylesheet for its clear colour. */
 :root {
   --bg: #0e1016;
   --bg-panel: #151821;
   --bg-sunken: #0a0c11;
+  --viewport-bg: #171a23;
   --line: #262b38;
   --line-soft: #1c202a;
   --text: #dfe4ee;
   --text-dim: #8b93a6;
   --accent: #64d2b3;
   --accent-dim: #2f6f60;
+  --accent-ink: #08120f;
   --danger: #e2685f;
+  --warn: #e8c57a;
+  --checker-a: #1a1e28;
+  --checker-b: #12151d;
+  --overlay: #151821cc;
+  --status-fade: #0e1016dd;
+  --bounds-color: #ffffff;
+  --bounds-alpha: 0.12;
   --radius: 6px;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
   color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg: #f4f5f8;
+  --bg-panel: #ffffff;
+  --bg-sunken: #eef0f5;
+  --viewport-bg: #e7eaf0;
+  --line: #d6dae4;
+  --line-soft: #e6e9f0;
+  --text: #1d2230;
+  --text-dim: #667085;
+  --accent: #178f73;
+  --accent-dim: #8ed3c1;
+  --accent-ink: #ffffff;
+  --danger: #c33f36;
+  --warn: #8a6410;
+  --checker-a: #dfe3ec;
+  --checker-b: #f2f4f8;
+  --overlay: #ffffffd9;
+  --status-fade: #f4f5f8dd;
+  --bounds-color: #1d2230;
+  --bounds-alpha: 0.35;
+  color-scheme: light;
 }
 
 * { box-sizing: border-box; }
@@ -106,8 +140,8 @@ h1, h2 { margin: 0; font-weight: 600; }
   background: var(--bg-sunken);
   border: 1px dashed var(--line);
   border-radius: var(--radius);
-  padding: 6px;
-  min-height: 84px;
+  padding: 6px 6px 22px;
+  min-height: 92px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -117,7 +151,7 @@ h1, h2 { margin: 0; font-weight: 600; }
 }
 
 .slot:hover { border-color: var(--accent-dim); }
-.slot.dragover { border-color: var(--accent); background: #10231f; }
+.slot.dragover { border-color: var(--accent); background: var(--bg-sunken); box-shadow: inset 0 0 0 999px rgba(100, 210, 179, 0.09); }
 .slot.filled { border-style: solid; }
 .slot.disabled { opacity: .4; }
 
@@ -126,6 +160,11 @@ h1, h2 { margin: 0; font-weight: 600; }
   text-transform: uppercase;
   letter-spacing: .07em;
   color: var(--text-dim);
+  width: 100%;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .slot canvas {
@@ -134,18 +173,27 @@ h1, h2 { margin: 0; font-weight: 600; }
   height: 52px;
   object-fit: contain;
   background:
-    linear-gradient(45deg, #1a1e28 25%, transparent 25%, transparent 75%, #1a1e28 75%) 0 0 / 8px 8px,
-    linear-gradient(45deg, #1a1e28 25%, transparent 25%, transparent 75%, #1a1e28 75%) 4px 4px / 8px 8px,
-    #12151d;
+    linear-gradient(45deg, var(--checker-a) 25%, transparent 25%, transparent 75%, var(--checker-a) 75%) 0 0 / 8px 8px,
+    linear-gradient(45deg, var(--checker-a) 25%, transparent 25%, transparent 75%, var(--checker-a) 75%) 4px 4px / 8px 8px,
+    var(--checker-b);
 }
 
-.slot-size { font-size: 10px; color: var(--text-dim); font-family: var(--mono); }
+/* Footer row: size on the left, tools on the right, so a long localised view
+   name above can use the full width without colliding with either. */
+.slot-size {
+  position: absolute;
+  left: 7px;
+  bottom: 5px;
+  font-size: 10px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+}
 
 .slot-tools {
   display: flex;
   gap: 3px;
   position: absolute;
-  top: 4px;
+  bottom: 4px;
   right: 4px;
   opacity: 0;
   transition: opacity .12s;
@@ -157,7 +205,7 @@ h1, h2 { margin: 0; font-weight: 600; }
   padding: 1px 4px;
   min-width: 0;
   line-height: 1.4;
-  background: #0f1219;
+  background: var(--bg-sunken);
   border: 1px solid var(--line);
   color: var(--text-dim);
   border-radius: 3px;
@@ -212,12 +260,12 @@ button {
 
 button.primary {
   background: var(--accent);
-  color: #08120f;
+  color: var(--accent-ink);
   font-weight: 600;
   border-color: var(--accent);
 }
-button.primary:hover { background: #7ae0c3; }
-button.primary:disabled { background: var(--accent-dim); border-color: var(--accent-dim); color: #0c1a16; cursor: not-allowed; }
+button.primary:hover { filter: brightness(1.12); }
+button.primary:disabled { background: var(--accent-dim); border-color: var(--accent-dim); opacity: .7; cursor: not-allowed; }
 
 button.ghost, .ghost.link {
   background: transparent;
@@ -230,6 +278,17 @@ button.ghost:hover, .ghost.link:hover { color: var(--text); border-color: var(--
 button.ghost:disabled { opacity: .45; cursor: not-allowed; }
 
 button.small { flex: 0 0 auto; padding: 4px 7px; font-size: 11px; }
+
+/* Square icon-ish toggles in the top bar (language, theme). */
+button.toggle {
+  min-width: 34px;
+  padding: 6px 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: .04em;
+  text-align: center;
+}
+button.toggle span { font-family: system-ui, sans-serif; font-size: 13px; line-height: 1; }
 
 button.linkish {
   background: none;
@@ -245,7 +304,7 @@ button.linkish {
 .viewport {
   position: relative;
   min-width: 0;
-  background: var(--bg);
+  background: var(--viewport-bg);
   display: flex;
 }
 
@@ -276,7 +335,7 @@ button.linkish {
 }
 
 .angle-chips button, .zoom-chip {
-  background: #151821cc;
+  background: var(--overlay);
   backdrop-filter: blur(6px);
   border: 1px solid var(--line);
   color: var(--text-dim);
@@ -329,13 +388,13 @@ button.linkish {
   font-family: var(--mono);
   font-size: 11px;
   color: var(--text-dim);
-  background: linear-gradient(transparent, #0e1016dd 55%);
+  background: linear-gradient(transparent, var(--status-fade) 55%);
   pointer-events: none;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.statusbar.warn { color: #e8c57a; }
+.statusbar.warn { color: var(--warn); }
 .statusbar.error { color: var(--danger); }
 
 /* ----------------------------------------------------------------- stats */

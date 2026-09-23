@@ -12,6 +12,8 @@ import { renderTurnaround, packSheet, snapToPalette, imageDataToPng, downloadBlo
 import { exportObj } from './export/obj.js';
 import { makeZip, blobBytes } from './export/zip.js';
 import { buildDemoViews } from './demo.js';
+import { t, num, getLang, setLang, applyTranslations } from './i18n.js';
+import { detectTheme, getTheme, setTheme, toggleTheme, cssColorToGl } from './ui/theme.js';
 
 /** @param {string} id */
 const $ = (id) => {
@@ -26,6 +28,8 @@ const state = {
   views: new Map(),
   /** @type {import('./core/volume.js').Volume | null} */
   volume: null,
+  /** @type {import('./core/carve.js').CarveStats | null} */
+  lastStats: null,
   gridSize: 32,
   /** @type {string | null} slot awaiting a file from the picker */
   pendingSlot: null,
@@ -42,20 +46,38 @@ try {
   renderer = new Renderer(canvas);
 } catch (err) {
   document.body.innerHTML =
-    '<div style="padding:40px;font:14px system-ui;color:#dfe4ee;background:#0e1016;height:100%">' +
-    '<h1 style="font-size:16px">WebGL2 required</h1><p style="color:#8b93a6">' +
-    String(err instanceof Error ? err.message : err) +
-    '</p></div>';
+    '<div style="padding:40px;font:14px system-ui;color:var(--text);height:100%">' +
+    '<h1 style="font-size:16px"></h1><p style="color:var(--text-dim)"></p></div>';
+  const h = document.querySelector('h1');
+  const p = document.querySelector('p');
+  if (h) h.textContent = t('error.webgl');
+  if (p) p.textContent = String(err instanceof Error ? err.message : err);
   throw err;
 }
 
 // ---------------------------------------------------------------- status
 
-/** @param {string} msg @param {'info'|'warn'|'error'} [level] */
-function status(msg, level = 'info') {
+/**
+ * The status bar remembers its key so it can be re-rendered on a language
+ * switch without the caller having to say anything again.
+ * @type {{key: string, params?: Record<string, string|number|string[]>, level: 'info'|'warn'|'error'}}
+ */
+let lastStatus = { key: 'status.ready', level: 'info' };
+
+/**
+ * @param {string} key i18n key
+ * @param {Record<string, string|number|string[]>} [params]
+ * @param {'info'|'warn'|'error'} [level]
+ */
+function status(key, params, level = 'info') {
+  lastStatus = { key, params, level };
+  renderStatus();
+}
+
+function renderStatus() {
   const el = $('statusbar');
-  el.textContent = msg;
-  el.className = 'statusbar' + (level === 'info' ? '' : ' ' + level);
+  el.textContent = t(lastStatus.key, lastStatus.params);
+  el.className = 'statusbar' + (lastStatus.level === 'info' ? '' : ' ' + lastStatus.level);
 }
 
 // ----------------------------------------------------------- source views
@@ -68,13 +90,13 @@ function buildSlots() {
     slot.className = 'slot';
     slot.dataset.view = name;
     slot.innerHTML =
-      '<span class="slot-name">' + name + '</span>' +
+      '<span class="slot-name" data-i18n="views.' + name + '"></span>' +
       '<canvas width="52" height="52"></canvas>' +
-      '<span class="slot-size">empty</span>' +
+      '<span class="slot-size"></span>' +
       '<div class="slot-tools">' +
-      '<button data-act="h" title="Flip horizontally">H</button>' +
-      '<button data-act="v" title="Flip vertically">V</button>' +
-      '<button data-act="x" title="Remove">&times;</button>' +
+      '<button data-act="h" data-i18n-title="views.flipH">H</button>' +
+      '<button data-act="v" data-i18n-title="views.flipV">V</button>' +
+      '<button data-act="x" data-i18n-title="views.remove">&times;</button>' +
       '</div>';
 
     slot.addEventListener('click', (e) => {
@@ -102,6 +124,7 @@ function buildSlots() {
 
     host.appendChild(slot);
   }
+  applyTranslations(host);
 }
 
 /** @param {string} name @param {string} act */
@@ -124,7 +147,7 @@ async function loadInto(name, file) {
     refreshSlots();
     build();
   } catch (err) {
-    status('Could not read that image: ' + (err instanceof Error ? err.message : err), 'error');
+    status('status.badImage', { err: String(err instanceof Error ? err.message : err) }, 'error');
   }
 }
 
@@ -152,7 +175,7 @@ function refreshSlots() {
     if (!ctx) continue;
     ctx.clearRect(0, 0, thumb.width, thumb.height);
     if (!view) {
-      size.textContent = 'empty';
+      size.textContent = t('views.empty');
       continue;
     }
     size.textContent = view.image.width + '×' + view.image.height;
@@ -211,11 +234,12 @@ function build() {
   const views = [...state.views.values()];
   if (views.length === 0) {
     state.volume = null;
+    state.lastStats = null;
     renderer.instanceCount = 0;
     $('viewport-empty').classList.remove('hidden');
     updateStats(null, 0);
     state.dirty = true;
-    status('ready');
+    status('status.ready');
     return;
   }
 
@@ -223,8 +247,10 @@ function build() {
   state.palette = new Palette();
   for (const v of views) v.autoPlace(N);
 
-  const { volume, stats } = carve(views, N, state.palette);
+  const mirrorMissing = /** @type {HTMLInputElement} */ ($('mirror-toggle')).checked;
+  const { volume, stats } = carve(views, N, state.palette, { mirrorMissing });
   state.volume = volume;
+  state.lastStats = stats;
 
   renderer.setPalette(state.palette);
   const faces = renderer.setVolume(volume);
@@ -239,42 +265,67 @@ function build() {
   state.dirty = true;
 
   if (volume.solidCount === 0) {
-    status('Carved nothing — the views may not overlap. Try flipping a view, or check the alpha channel.', 'warn');
+    status('status.emptyCarve', undefined, 'warn');
   } else if (state.palette.overflowed) {
-    status('Built in ' + stats.ms.toFixed(0) + ' ms — art has more than 255 colours, extras were snapped to the nearest.', 'warn');
+    status('status.paletteOverflow', { ms: stats.ms.toFixed(0) }, 'warn');
+  } else if (stats.mirrored.length > 0) {
+    status('status.builtMirrored', {
+      n: volume.solidCount,
+      ms: stats.ms.toFixed(0),
+      views: stats.mirrored.map((v) => 'views.' + v),
+    });
   } else {
-    status('Built ' + volume.solidCount.toLocaleString() + ' voxels in ' + stats.ms.toFixed(0) + ' ms');
+    status('status.built', { n: volume.solidCount, ms: stats.ms.toFixed(0) });
   }
 }
 
 /**
- * @param {{solid: number, painted: number, inferred: number, ms: number} | null} stats
+ * @param {import('./core/carve.js').CarveStats | null} stats
  * @param {number} faces
  */
 function updateStats(stats, faces) {
   const el = $('stats');
+  el.textContent = '';
   if (!stats || !state.volume) {
-    el.innerHTML = '<div>no model</div>';
+    const row = document.createElement('div');
+    row.textContent = t('stats.none');
+    el.appendChild(row);
     return;
   }
+
   const b = state.volume.bounds();
-  const size = b ? (b.max[0] - b.min[0] + 1) + '×' + (b.max[1] - b.min[1] + 1) + '×' + (b.max[2] - b.min[2] + 1) : '-';
-  el.innerHTML =
-    '<div>voxels <b>' + stats.solid.toLocaleString() + '</b></div>' +
-    '<div>faces <b>' + faces.toLocaleString() + '</b></div>' +
-    '<div>extent <b>' + size + '</b></div>' +
-    '<div>palette <b>' + (state.palette.size - 1) + '</b></div>' +
-    '<div>inferred faces <b>' + stats.inferred.toLocaleString() + '</b></div>';
+  const size = b
+    ? (b.max[0] - b.min[0] + 1) + '×' + (b.max[1] - b.min[1] + 1) + '×' + (b.max[2] - b.min[2] + 1)
+    : '—';
+
+  /** @type {Array<[string, string]>} */
+  const rows = [
+    ['stats.voxels', num(stats.solid)],
+    ['stats.faces', num(faces)],
+    ['stats.extent', size],
+    ['stats.palette', String(state.palette.size - 1)],
+    ['stats.inferred', num(stats.inferred)],
+  ];
+  if (stats.mirrored.length > 0) rows.push(['stats.mirrored', String(stats.mirrored.length)]);
+
+  for (const [key, value] of rows) {
+    const row = document.createElement('div');
+    row.append(t(key) + ' ');
+    const b2 = document.createElement('b');
+    b2.textContent = value;
+    row.appendChild(b2);
+    el.appendChild(row);
+  }
 }
 
 // ------------------------------------------------------------- viewport UI
 
 const ANGLE_CHIPS = [
-  { label: 'Front', yaw: 0 },
-  { label: 'Right', yaw: 90 },
-  { label: 'Back', yaw: 180 },
-  { label: 'Left', yaw: 270 },
-  { label: 'Iso', yaw: 45 },
+  { key: 'angle.front', yaw: 0 },
+  { key: 'angle.right', yaw: 90 },
+  { key: 'angle.back', yaw: 180 },
+  { key: 'angle.left', yaw: 270 },
+  { key: 'angle.iso', yaw: 45 },
 ];
 
 function buildAngleChips() {
@@ -283,7 +334,8 @@ function buildAngleChips() {
   for (const chip of ANGLE_CHIPS) {
     const b = document.createElement('button');
     b.type = 'button';
-    b.textContent = chip.label;
+    b.dataset.i18n = chip.key;
+    b.textContent = t(chip.key);
     b.addEventListener('click', () => {
       camera.yaw = chip.yaw * DEG;
       camera.panX = 0;
@@ -306,14 +358,20 @@ function markActiveChip() {
 
 function buildPitchPresets() {
   const sel = /** @type {HTMLSelectElement} */ ($('pitch-preset'));
+  const keep = sel.value;
   sel.innerHTML = '';
   for (const p of PITCH_PRESETS) {
     const o = document.createElement('option');
     o.value = p.id;
-    o.textContent = p.label;
+    o.textContent = t(p.key);
     sel.appendChild(o);
   }
-  sel.value = 'iso21';
+  sel.value = keep || 'iso21';
+  if (sel.selectedIndex < 0) sel.value = 'iso21';
+}
+
+function wirePitchPresets() {
+  const sel = /** @type {HTMLSelectElement} */ ($('pitch-preset'));
   sel.addEventListener('change', () => {
     const p = PITCH_PRESETS.find((x) => x.id === sel.value);
     if (p) {
@@ -431,13 +489,14 @@ function updateFramePreview() {
   const pad = opts.padding ?? 0;
   const fw = Math.ceil(maxW * scale) + pad * 2;
   const fh = Math.ceil(maxH * scale) + pad * 2;
-  $('frame-preview').textContent =
-    'frame ' + fw + '×' + fh + ' px · sheet ' + fw * yaws.length + '×' + fh + ' px · same canvas every frame';
+  $('frame-preview').textContent = t('export.framePreview', {
+    fw, fh, sw: fw * yaws.length, sh: fh,
+  });
 }
 
 async function exportSheet() {
   if (!state.volume) return;
-  status('rendering…');
+  status('status.rendering');
   await nextFrame();
   try {
     const opts = turnaroundOptions();
@@ -445,15 +504,15 @@ async function exportSheet() {
     if (opts.shaded) for (const f of frames) snapToPalette(f, state.palette);
     const { image } = packSheet(frames, meta.frameW, meta.frameH);
     downloadBlob(await imageDataToPng(image), 'pixhull-sheet-' + meta.count + 'dir.png');
-    status('Exported ' + meta.count + ' frames at ' + meta.frameW + '×' + meta.frameH + ' px');
+    status('status.exportedSheet', { n: meta.count, w: meta.frameW, h: meta.frameH });
   } catch (err) {
-    status(String(err instanceof Error ? err.message : err), 'error');
+    status('status.badImage', { err: String(err instanceof Error ? err.message : err) }, 'error');
   }
 }
 
 async function exportFrames() {
   if (!state.volume) return;
-  status('rendering…');
+  status('status.rendering');
   await nextFrame();
   try {
     const opts = turnaroundOptions();
@@ -492,15 +551,15 @@ async function exportFrames() {
     files.push({ name: 'sprites.json', data: new TextEncoder().encode(JSON.stringify(json, null, 2)) });
 
     downloadBlob(makeZip(files), 'pixhull-sprites.zip');
-    status('Exported ' + meta.count + ' frames + metadata');
+    status('status.exportedFrames', { n: meta.count });
   } catch (err) {
-    status(String(err instanceof Error ? err.message : err), 'error');
+    status('status.badImage', { err: String(err instanceof Error ? err.message : err) }, 'error');
   }
 }
 
 async function doExportObj() {
   if (!state.volume) return;
-  status('meshing…');
+  status('status.meshing');
   await nextFrame();
   try {
     const { obj, mtl, stats } = exportObj(state.volume, state.palette, { name: 'pixhull' });
@@ -513,9 +572,9 @@ async function doExportObj() {
       'pixhull-model.zip'
     );
     const saved = stats.rawQuads > 0 ? Math.round((1 - stats.quads / stats.rawQuads) * 100) : 0;
-    status('OBJ: ' + stats.quads.toLocaleString() + ' quads (' + saved + '% merged), ' + stats.vertices.toLocaleString() + ' verts');
+    status('status.exportedObj', { quads: stats.quads, saved, verts: stats.vertices });
   } catch (err) {
-    status(String(err instanceof Error ? err.message : err), 'error');
+    status('status.badImage', { err: String(err instanceof Error ? err.message : err) }, 'error');
   }
 }
 
@@ -537,7 +596,7 @@ async function saveProject() {
   }
   const project = { format: 'pixhull-project', version: 1, gridSize: state.gridSize, views };
   downloadBlob(new Blob([JSON.stringify(project)], { type: 'application/json' }), 'project.pixhull.json');
-  status('Project saved');
+  status('status.projectSaved');
 }
 
 /** @param {File} file */
@@ -560,9 +619,9 @@ async function loadProject(file) {
     /** @type {HTMLSelectElement} */ ($('grid-size')).value = String(state.gridSize);
     refreshSlots();
     build();
-    status('Project loaded');
+    status('status.projectLoaded');
   } catch (err) {
-    status('Could not load project: ' + (err instanceof Error ? err.message : err), 'error');
+    status('status.projectFailed', { err: String(err instanceof Error ? err.message : err) }, 'error');
   }
 }
 
@@ -605,11 +664,65 @@ function loadDemo() {
   build();
 }
 
+// ------------------------------------------------------- theme & language
+
+/** Pull the viewport colours out of the stylesheet so there is one source. */
+function applyThemeToRenderer() {
+  renderer.clearColor = cssColorToGl('--viewport-bg');
+  const rgb = cssColorToGl('--bounds-color');
+  const alpha = parseFloat(
+    getComputedStyle(document.documentElement).getPropertyValue('--bounds-alpha')
+  );
+  renderer.boundsColor = [rgb[0], rgb[1], rgb[2], Number.isFinite(alpha) ? alpha : 0.12];
+  state.dirty = true;
+}
+
+function refreshThemeButton() {
+  $('theme-icon').textContent = getTheme() === 'light' ? '◑' : '◐';
+}
+
+function refreshLanguageButton() {
+  $('btn-lang').textContent = getLang().toUpperCase();
+}
+
+/** Re-render everything that holds a translated string. */
+function retranslate() {
+  applyTranslations();
+  buildPitchPresets();
+  buildAngleChips();
+  refreshSlots();
+  refreshLanguageButton();
+  renderStatus();
+  updateStats(state.lastStats, renderer.instanceCount);
+  updateFramePreview();
+}
+
 function init() {
+  setTheme(detectTheme());
+  applyThemeToRenderer();
+  refreshThemeButton();
+  setLang(getLang());
+
   buildSlots();
   buildAngleChips();
   buildPitchPresets();
+  wirePitchPresets();
   setupOrbit();
+  applyTranslations();
+  refreshLanguageButton();
+
+  $('btn-theme').addEventListener('click', () => {
+    toggleTheme();
+    applyThemeToRenderer();
+    refreshThemeButton();
+  });
+
+  $('btn-lang').addEventListener('click', () => {
+    setLang(getLang() === 'en' ? 'ru' : 'en');
+    retranslate();
+  });
+
+  $('mirror-toggle').addEventListener('change', build);
 
   $('btn-demo').addEventListener('click', loadDemo);
   $('btn-demo-2').addEventListener('click', loadDemo);

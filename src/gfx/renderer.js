@@ -128,8 +128,10 @@ export class Renderer {
 
     this.instanceCount = 0;
     this.shade = 1;
-    /** @type {[number, number, number, number]} */
+    /** @type {[number, number, number, number]} Set from the stylesheet so the viewport follows the theme. */
     this.clearColor = [0.09, 0.10, 0.13, 1];
+    /** @type {[number, number, number, number]} Grid wireframe, likewise themed. */
+    this.boundsColor = [1, 1, 1, 0.12];
   }
 
   /** @param {import('../core/palette.js').Palette} palette */
@@ -262,7 +264,7 @@ export class Renderer {
       gl.disable(gl.CULL_FACE);
       gl.useProgram(this.boxProgram);
       gl.uniformMatrix4fv(this.boxU.uViewProj, false, vp);
-      gl.uniform4f(this.boxU.uColor, 1, 1, 1, 0.12);
+      gl.uniform4f(this.boxU.uColor, this.boundsColor[0], this.boundsColor[1], this.boundsColor[2], this.boundsColor[3]);
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.bindVertexArray(this.boxVao);

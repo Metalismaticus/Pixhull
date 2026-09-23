@@ -69,6 +69,25 @@ cannot contain a colour that was not in the source art, rendering runs with
 antialiasing off, and shaded exports are snapped back to the palette. A flat
 export is verifiably exact: zero off-palette pixels, zero partial alpha.
 
+### Mirrored fill for the views you did not draw
+
+Draw three views and three facings have no source at all — the back, the left
+and the underside. Guessing a colour for them from neighbouring faces leaves
+half the model looking flat and wrong, and a face with no colour at all is
+*discarded by the shader*, which is a hole you can see straight through.
+
+So a missing view is synthesised by mirroring its opposite. This cannot change
+the shape: the back silhouette of an opaque object is the mirrored front
+silhouette, so the mirrored view contributes colour only. Anything still
+uncovered falls back to the model's dominant colour, and the invariant is that
+no exposed face is ever left uncoloured.
+
+### Light and dark, English and Russian
+
+Both themes follow the system preference on first load and are remembered after
+that. The UI switches between English and Russian from the top bar, including
+numbers, which pick up the locale's separators.
+
 ### Any image size
 
 Views do not have to be square, do not have to match each other, and do not

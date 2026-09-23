@@ -5,6 +5,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pixhull — pixel art to 3D</title>
 <meta name="description" content="Turn front / side / top pixel art into a 3D voxel model and export pixel-perfect sprite turnarounds. Free, open source, runs entirely in your browser.">
+<script>
+  // Apply the stored theme before the stylesheet paints, so a light-theme user
+  // never sees a dark flash on load.
+  try {
+    var saved = localStorage.getItem('pixhull.theme');
+    document.documentElement.dataset.theme =
+      saved === 'light' || saved === 'dark'
+        ? saved
+        : (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+  } catch (e) {
+    document.documentElement.dataset.theme = 'dark';
+  }
+</script>
 <link rel="stylesheet" href="css/app.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%23151821'/><path d='M4 6h8v6H4z' fill='%2364d2b3'/><path d='M4 6l4-3 4 3-4 3z' fill='%23a6e9d5'/></svg>">
 </head>
@@ -14,12 +27,16 @@
   <div class="brand">
     <span class="logo" aria-hidden="true"></span>
     <h1>Pixhull</h1>
-    <span class="tagline">front / side / top &rarr; voxels &rarr; sprites</span>
+    <span class="tagline" data-i18n="app.tagline"></span>
   </div>
   <div class="topbar-actions">
-    <button id="btn-demo" class="ghost" type="button">Load demo</button>
-    <button id="btn-clear" class="ghost" type="button">Clear</button>
-    <a class="ghost link" href="https://github.com/Metalismaticus/Pixhull" id="repo-link" target="_blank" rel="noopener">Source</a>
+    <button id="btn-demo" class="ghost" type="button" data-i18n="app.loadDemo"></button>
+    <button id="btn-clear" class="ghost" type="button" data-i18n="app.clear"></button>
+    <button id="btn-lang" class="ghost toggle" type="button" data-i18n-title="app.language">EN</button>
+    <button id="btn-theme" class="ghost toggle" type="button" data-i18n-title="app.theme" aria-hidden="false">
+      <span id="theme-icon">◐</span>
+    </button>
+    <a class="ghost link" href="https://github.com/Metalismaticus/Pixhull" id="repo-link" target="_blank" rel="noopener" data-i18n="app.source"></a>
   </div>
 </header>
 
@@ -27,14 +44,13 @@
 
   <!-- ------------------------------------------------------------------ -->
   <aside class="panel panel-left">
-    <h2>Source views</h2>
-    <p class="hint">Drop a PNG on any slot. Any size — each view is placed on the
-      grid independently, so views do not have to match.</p>
+    <h2 data-i18n="views.heading"></h2>
+    <p class="hint" data-i18n="views.hint"></p>
 
     <div id="view-slots" class="view-slots"></div>
 
     <div class="field">
-      <label for="grid-size">Grid</label>
+      <label for="grid-size" data-i18n="grid.label"></label>
       <select id="grid-size">
         <option value="16">16³</option>
         <option value="24">24³</option>
@@ -46,10 +62,10 @@
         <option value="192">192³</option>
         <option value="256">256³</option>
       </select>
-      <button id="btn-autofit" class="ghost small" type="button">Fit to art</button>
+      <button id="btn-autofit" class="ghost small" type="button" data-i18n="grid.fit"></button>
     </div>
 
-    <button id="btn-build" class="primary" type="button">Build model</button>
+    <button id="btn-build" class="primary" type="button" data-i18n="grid.build"></button>
   </aside>
 
   <!-- ------------------------------------------------------------------ -->
@@ -59,72 +75,77 @@
     <div class="viewport-overlay">
       <div class="angle-chips" id="angle-chips"></div>
       <div class="zoom-chip">
-        <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+        <button id="zoom-out" type="button" data-i18n-aria="viewport.zoomOut">−</button>
         <span id="zoom-label">4×</span>
-        <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+        <button id="zoom-in" type="button" data-i18n-aria="viewport.zoomIn">+</button>
       </div>
     </div>
 
     <div id="viewport-empty" class="viewport-empty">
-      <p>Nothing built yet.</p>
-      <p class="hint">Drop art into a view slot, or <button id="btn-demo-2" class="linkish" type="button">load the demo</button>.</p>
+      <p data-i18n="viewport.emptyTitle"></p>
+      <p class="hint"><span data-i18n="viewport.emptyHintBefore"></span><button id="btn-demo-2" class="linkish" type="button" data-i18n="viewport.emptyHintLink"></button><span data-i18n="viewport.emptyHintAfter"></span></p>
     </div>
 
-    <div class="statusbar" id="statusbar">ready</div>
+    <div class="statusbar" id="statusbar"></div>
   </section>
 
   <!-- ------------------------------------------------------------------ -->
   <aside class="panel panel-right">
-    <h2>View</h2>
+    <h2 data-i18n="view.heading"></h2>
     <div class="field">
-      <label for="pitch-preset">Elevation</label>
+      <label for="pitch-preset" data-i18n="view.elevation"></label>
       <select id="pitch-preset"></select>
     </div>
     <div class="field checkbox">
       <input type="checkbox" id="shade-toggle" checked>
-      <label for="shade-toggle">Face shading (viewport only)</label>
+      <label for="shade-toggle" data-i18n="view.shading"></label>
     </div>
     <div class="field checkbox">
       <input type="checkbox" id="bounds-toggle" checked>
-      <label for="bounds-toggle">Show grid bounds</label>
+      <label for="bounds-toggle" data-i18n="view.bounds"></label>
     </div>
+    <div class="field checkbox">
+      <input type="checkbox" id="mirror-toggle" checked>
+      <label for="mirror-toggle" data-i18n="view.mirror"></label>
+    </div>
+    <p class="hint" data-i18n="view.mirrorHint"></p>
 
-    <h2>Sprite export</h2>
+    <h2 data-i18n="export.heading"></h2>
     <div class="field">
-      <label for="dir-count">Directions</label>
+      <label for="dir-count" data-i18n="export.directions"></label>
       <input type="number" id="dir-count" min="1" max="64" step="1" value="8">
     </div>
     <div class="field">
-      <label for="angle-mode">Angles</label>
+      <label for="angle-mode" data-i18n="export.angles"></label>
       <select id="angle-mode">
-        <option value="clean" selected>Pixel-clean slopes</option>
-        <option value="uniform">Uniform 360/n</option>
+        <option value="clean" selected data-i18n="export.anglesClean"></option>
+        <option value="uniform" data-i18n="export.anglesUniform"></option>
       </select>
     </div>
     <p class="hint" id="angle-preview">—</p>
     <div class="field">
-      <label for="export-scale">Scale</label>
+      <label for="export-scale" data-i18n="export.scale"></label>
       <input type="number" id="export-scale" min="1" max="16" step="1" value="1">
-      <span class="unit">px / voxel</span>
+      <span class="unit" data-i18n="export.scaleUnit"></span>
     </div>
     <div class="field">
-      <label for="export-pad">Padding</label>
+      <label for="export-pad" data-i18n="export.padding"></label>
       <input type="number" id="export-pad" min="0" max="64" step="1" value="0">
-      <span class="unit">px</span>
+      <span class="unit" data-i18n="export.paddingUnit"></span>
     </div>
     <div class="field checkbox">
       <input type="checkbox" id="export-shaded">
-      <label for="export-shaded">Shaded, snapped back to palette</label>
+      <label for="export-shaded" data-i18n="export.shaded"></label>
     </div>
     <p class="hint" id="frame-preview">—</p>
 
-    <button id="btn-export-sheet" class="primary" type="button">Export sprite sheet</button>
-    <button id="btn-export-frames" class="ghost" type="button">Export frames + JSON</button>
+    <button id="btn-export-sheet" class="primary" type="button" data-i18n="export.sheet"></button>
+    <button id="btn-export-frames" class="ghost" type="button" data-i18n="export.frames"></button>
 
-    <h2>Model</h2>
-    <button id="btn-export-obj" class="ghost" type="button">Export OBJ + MTL</button>
-    <button id="btn-save" class="ghost" type="button">Save project</button>
-    <button id="btn-load" class="ghost" type="button">Load project</button>
+    <h2 data-i18n="model.heading"></h2>
+    <button id="btn-export-obj" class="ghost" type="button" data-i18n="model.obj"></button>
+    <button id="btn-save" class="ghost" type="button" data-i18n="model.save"></button>
+    <button id="btn-load" class="ghost" type="button" data-i18n="model.load"></button>
 
     <div class="stats" id="stats"></div>
   </aside>
