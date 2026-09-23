@@ -23,6 +23,21 @@
  * colour of the front view; the top edge of it, the colour of the top view. On
  * a red-cabbed lorry that is decisive.
  *
+ * "Looks like" has to mean more than "has the same average colour", though.
+ * Averaged, the underside of a lorry is grey at both ends: the two dozen red
+ * cells where the bumper wraps under vanish into a thousand grey ones, and
+ * with them the only evidence of which end is the front. That is exactly how
+ * the bottom view came to be mounted back to front while every other view
+ * agreed with every other - and, the silhouette of a chassis being very
+ * nearly symmetric, nothing about the shape objected.
+ *
+ * So an end is compared as a histogram of colours rather than as a mean, and
+ * each colour is weighted by how rare it is across the sheet. A grey that
+ * turns up in all six drawings says nothing about which end is which; a red
+ * that turns up in three says a great deal. Measured on the lorry, the mean
+ * put the two answers within 3% of each other and picked the wrong one, while
+ * the weighted histogram separates them by 20%.
+ *
  * With at most six views and four orientations left to settle for each - a half
  * turn and a mirror, the quarter turn having been fixed by dimensions - the
  * search is exhaustive. Four thousand combinations of cheap table lookups beats
@@ -36,13 +51,33 @@ import { ALPHA_THRESHOLD } from './views.js';
 const WORK = 48;
 
 /**
+ * Levels per channel the colour vocabulary is quantised to.
+ *
+ * Six is the coarsest setting that still keeps a red cab apart from an orange
+ * indicator, and coarse is what is wanted: anti-aliasing spreads one painted
+ * surface over dozens of near-identical values, and two views of the same
+ * surface never land on the same one. Four levels merge red into brown and the
+ * margin collapses to 2%; eight splits the greys back up and gains nothing.
+ */
+const LEVELS = 6;
+const BINS = LEVELS * LEVELS * LEVELS;
+
+/** @param {number} c packed 0xRRGGBB */
+function colourBin(c) {
+  const r = Math.min(LEVELS - 1, (((c >> 16) & 255) * LEVELS) >> 8);
+  const g = Math.min(LEVELS - 1, (((c >> 8) & 255) * LEVELS) >> 8);
+  const b = Math.min(LEVELS - 1, ((c & 255) * LEVELS) >> 8);
+  return (r * LEVELS + g) * LEVELS + b;
+}
+
+/**
  * How each view's image axes map onto model axes, sign included.
  *
  * This mirrors VIEW_GEOM's uv functions exactly - `front` has u = x and
  * v = N-1-y, so its horizontal axis runs with +x and its vertical against +y -
  * and lets everything be compared in model space rather than image space.
  */
-const IMAGE_AXES = {
+export const IMAGE_AXES = {
   front: { u: ['x', 1], v: ['y', -1] },
   back: { u: ['x', -1], v: ['y', -1] },
   right: { u: ['z', -1], v: ['y', -1] },
@@ -130,6 +165,54 @@ function orient(stamp, rotate, flipH, flipV) {
   return { on, rgb };
 }
 
+/**
+ * How much each colour is worth as evidence: a lot if it is rare across the
+ * sheet, nothing if every drawing is full of it.
+ *
+ * Which colours a drawing contains does not depend on which way up it hangs,
+ * so this is computed once, from the unturned stamps.
+ *
+ * @param {Array<{on: Uint8Array, rgb: Int32Array}>} stamps
+ * @returns {Float64Array} weight per colour bin
+ */
+function rarity(stamps) {
+  const count = new Float64Array(BINS);
+  let total = 0;
+  for (const s of stamps) {
+    for (let i = 0; i < s.on.length; i++) {
+      if (!s.on[i]) continue;
+      count[colourBin(s.rgb[i])]++;
+      total++;
+    }
+  }
+  const idf = new Float64Array(BINS);
+  for (let k = 0; k < BINS; k++) if (count[k] > 0) idf[k] = Math.log(1 + total / count[k]);
+  return idf;
+}
+
+/**
+ * Weighted, normalised colour histogram of the cells a predicate keeps.
+ *
+ * @param {{on: Uint8Array, rgb: Int32Array}} oriented
+ * @param {Float64Array} idf
+ * @param {(a: number, b: number) => boolean} [keep] all cells if omitted
+ */
+function histOf(oriented, idf, keep) {
+  const h = new Float64Array(BINS);
+  let sum = 0;
+  for (let b = 0; b < WORK; b++) {
+    for (let a = 0; a < WORK; a++) {
+      const i = b * WORK + a;
+      if (!oriented.on[i] || (keep && !keep(a, b))) continue;
+      const k = colourBin(oriented.rgb[i]);
+      h[k] += idf[k];
+      sum += idf[k];
+    }
+  }
+  if (sum > 0) for (let k = 0; k < BINS; k++) h[k] /= sum;
+  return h;
+}
+
 /** @param {Float64Array} p */
 function reversed(p) {
   const out = new Float64Array(p.length);
@@ -139,72 +222,50 @@ function reversed(p) {
 
 /**
  * Everything a single orientation of one view contributes to scoring: an
- * occupancy profile along each model axis it spans, the mean colour of the
- * slices at each end of those axes, and the mean colour overall.
+ * occupancy profile along each model axis it spans, and a colour histogram of
+ * the slices at each end of those axes.
+ *
+ * @param {string} name
+ * @param {{on: Uint8Array, rgb: Int32Array}} oriented
+ * @param {Float64Array} idf
  */
-function describe(name, oriented) {
+function describe(name, oriented, idf) {
   const conv = IMAGE_AXES[name];
   const cols = new Float64Array(WORK);
   const rows = new Float64Array(WORK);
-  let sr = 0, sg = 0, sb = 0, n = 0;
+  let n = 0;
 
   for (let b = 0; b < WORK; b++) {
     for (let a = 0; a < WORK; a++) {
-      const i = b * WORK + a;
-      if (!oriented.on[i]) continue;
+      if (!oriented.on[b * WORK + a]) continue;
       cols[a]++;
       rows[b]++;
-      const c = oriented.rgb[i];
-      sr += (c >> 16) & 255;
-      sg += (c >> 8) & 255;
-      sb += c & 255;
       n++;
     }
   }
 
   /** @type {Record<string, Float64Array>} */
   const profile = {};
-  /** @type {Record<string, {min: number[], max: number[]}>} */
+  /** @type {Record<string, {min: Float64Array, max: Float64Array}>} */
   const caps = {};
 
   for (const which of /** @type {const} */ (['u', 'v'])) {
     const [axis, sign] = conv[which];
     const along = which === 'u' ? cols : rows;
     profile[axis] = sign > 0 ? along : reversed(along);
-    caps[axis] = capColours(oriented, which, sign);
+    caps[axis] = capHists(oriented, which, sign, idf);
   }
 
-  return { profile, caps, mean: n ? [sr / n, sg / n, sb / n] : [0, 0, 0], area: n };
+  return { profile, caps, area: n };
 }
 
-/** Mean colour of the outer quarter at each end of one image axis, in model order. */
-function capColours(oriented, which, sign) {
+/** Colour histograms of the outer quarter at each end of one image axis, in model order. */
+function capHists(oriented, which, sign, idf) {
   const quarter = Math.max(1, Math.round(WORK / 4));
-  const low = [0, 0, 0];
-  const high = [0, 0, 0];
-  let lowN = 0;
-  let highN = 0;
-
-  for (let b = 0; b < WORK; b++) {
-    for (let a = 0; a < WORK; a++) {
-      const i = b * WORK + a;
-      if (!oriented.on[i]) continue;
-      const along = which === 'u' ? a : b;
-      const target = along < quarter ? low : along >= WORK - quarter ? high : null;
-      if (!target) continue;
-      const c = oriented.rgb[i];
-      target[0] += (c >> 16) & 255;
-      target[1] += (c >> 8) & 255;
-      target[2] += c & 255;
-      if (target === low) lowN++; else highN++;
-    }
-  }
-
-  const norm = (t, count) => (count ? [t[0] / count, t[1] / count, t[2] / count] : null);
-  const a = norm(low, lowN);
-  const b = norm(high, highN);
+  const low = histOf(oriented, idf, (a, b) => (which === 'u' ? a : b) < quarter);
+  const high = histOf(oriented, idf, (a, b) => (which === 'u' ? a : b) >= WORK - quarter);
   // Image-low is model-low only when the axis runs with the image.
-  return sign > 0 ? { min: a, max: b } : { min: b, max: a };
+  return sign > 0 ? { min: low, max: high } : { min: high, max: low };
 }
 
 /**
@@ -224,11 +285,16 @@ function profileAgreement(p, q) {
   return 1 - distance / 2;
 }
 
-/** 1 for identical colours, 0 for opposite corners of the cube. */
-function colourAgreement(a, b) {
+/**
+ * Histogram intersection: 1 when two colour distributions coincide, 0 when
+ * they share nothing. Both sides are already normalised, so this is the share
+ * of one distribution the other accounts for.
+ */
+function histAgreement(a, b) {
   if (!a || !b) return 0;
-  const d = Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
-  return Math.max(0, 1 - d / 441.673);
+  let s = 0;
+  for (let i = 0; i < BINS; i++) s += Math.min(a[i], b[i]);
+  return s;
 }
 
 /**
@@ -241,10 +307,16 @@ export function alignViews(views) {
   const active = views.filter((v) => v.enabled && v.trim.w > 0 && AXES_OF[v.name]);
   if (active.length < 2) return [];
 
+  const stamps = active.map(stampOf);
+  const idf = rarity(stamps);
+  // What a drawing is *made of* does not change when it is turned, so the
+  // whole-view histogram every end is compared against is computed once.
+  const whole = stamps.map((s) => histOf(s, idf));
+
   // Each view keeps its quarter turn and chooses between four ways of sitting
   // in it; a view the artist has oriented by hand gets exactly one.
-  const options = active.map((view) => {
-    const stamp = stampOf(view);
+  const options = active.map((view, index) => {
+    const stamp = stamps[index];
     const base = view.rotate % 180;
     const combos = view.orientLocked
       ? [{ rotate: view.rotate, flipH: view.flipH }]
@@ -256,7 +328,7 @@ export function alignViews(views) {
         ];
     return combos.map((c) => ({
       ...c,
-      ...describe(view.name, orient(stamp, c.rotate, c.flipH, view.flipV)),
+      ...describe(view.name, orient(stamp, c.rotate, c.flipH, view.flipV), idf),
     }));
   });
 
@@ -293,7 +365,7 @@ export function alignViews(views) {
           const other = facing[axis][end];
           if (!other || other === active[i]) continue;
           const k = active.indexOf(other);
-          total += CAP_WEIGHT * colourAgreement(chosen[i].caps[axis][end], chosen[k].mean);
+          total += CAP_WEIGHT * histAgreement(chosen[i].caps[axis][end], whole[k]);
         }
       }
     }
