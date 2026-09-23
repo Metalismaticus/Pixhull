@@ -230,6 +230,33 @@ still wrong. Each view can be turned a quarter at a time, and the fitting step
 picks the turns that make the shared axes agree, searching all 64 combinations
 because six views is small enough not to need cleverness. That took the lorry
 from 2.07× down to 1.26×. A view turned by hand is left alone thereafter.
+### Which way round each drawing goes
+
+Matching dimensions is not enough. A top view laid out lengthways fits the
+grid equally well turned clockwise or anticlockwise, so a solver that only
+compares sizes picks one arbitrarily — and half the time the nose ends up at
+the wrong end of the model. The front view then paints the back, and wherever
+two drawings disagree about where the cab stops, a face gets painted from the
+wrong side: red speckles on a white box, white streaks across a red cab. One
+misorientation, both symptoms.
+
+Two kinds of evidence settle it. Views sharing a model axis are looking at the
+same object along it, so their occupancy profiles along that axis must line up
+— which catches mirroring. That cannot anchor an axis in space, though:
+reverse z everywhere at once and every profile still agrees while the model is
+built back to front. The anchor is that **the far slice of a view along an
+axis should look like the view that stares down that axis**. The nose end of a
+side view should be the colour of the front view. On a red-cabbed lorry that
+is decisive.
+
+With six views and four orientations each left to settle, the search is
+exhaustive. A greedy walk was tried first and failed exactly where you would
+expect: it had to commit to a side view before anything spanning that side
+view’s long axis had been placed, so it had nothing to compare against.
+
+On the lorry sheet it turns the top view 270° rather than 90° and mirrors both
+side views, which is what a person doing it by hand arrives at. Red faces go
+from spread evenly along the whole length to 89% of them in the last quarter.
 ### Any image size
 
 Views do not have to be square, do not have to match each other, and do not
@@ -277,6 +304,7 @@ Pages serves; there is nothing to build, so the repository root is the site.
 | [`src/core/volume.js`](src/core/volume.js) | Sparse 16³-chunked voxel storage, occupancy bitset + 6 palette bytes per voxel |
 | [`src/core/carve.js`](src/core/carve.js) | Silhouette intersection and per-face colour transfer |
 | [`src/core/views.js`](src/core/views.js) | Source images, trimming, placement, the view↔axis convention |
+| [`src/core/align.js`](src/core/align.js) | Deciding which way round each drawing goes, from profiles and end colours |
 | [`src/core/diagnose.js`](src/core/diagnose.js) | Spotting a drawing that is in the wrong slot, by silhouette |
 | [`src/core/sheet.js`](src/core/sheet.js) | Slicing one reference sheet into views, and naming them by size |
 | [`src/gfx/camera.js`](src/gfx/camera.js) | Orthographic camera and the pixel-clean angle maths |

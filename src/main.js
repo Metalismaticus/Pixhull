@@ -156,13 +156,18 @@ function buildSlots() {
 function slotAction(name, act) {
   const view = state.views.get(name);
   if (!view) return;
+  // Any manual change to how a view sits takes it out of the solvers' hands.
   if (act === 'r') {
-    // A hand-turned view is left alone by the automatic solver from here on.
     view.rotate = (view.rotate + 90) % 360;
-    view.rotateLocked = true;
-  } else if (act === 'h') view.flipH = !view.flipH;
-  else if (act === 'v') view.flipV = !view.flipV;
-  else if (act === 'x') state.views.delete(name);
+    view.orientLocked = true;
+  } else if (act === 'h') {
+    view.flipH = !view.flipH;
+    view.orientLocked = true;
+  } else if (act === 'v') {
+    view.flipV = !view.flipV;
+    view.orientLocked = true;
+  }
+  if (act === 'x') state.views.delete(name);
   refreshSlots();
   build();
 }

@@ -16,6 +16,8 @@
 
 import { DIR_PX, DIR_NX, DIR_PY, DIR_NY, DIR_PZ, DIR_NZ } from './volume.js';
 
+import { alignViews } from './align.js';
+
 /** Order matters: it is the UI order and the serialisation order. */
 export const VIEW_NAMES = /** @type {const} */ (['front', 'back', 'right', 'left', 'top', 'bottom']);
 
@@ -58,8 +60,8 @@ export class SourceView {
      * Without this the axes cannot be made to agree at all.
      */
     this.rotate = 0;
-    /** True once the artist has turned this view themselves; the solver then leaves it be. */
-    this.rotateLocked = false;
+    /** True once the artist has turned or mirrored this view themselves; the solvers then leave it be. */
+    this.orientLocked = false;
     /** Source pixels per grid cell, per axis. 1 is one art pixel per voxel. */
     this.scaleX = 1;
     this.scaleY = 1;
@@ -323,7 +325,7 @@ export const VIEW_AXES = {
  * @param {SourceView[]} active
  */
 function chooseRotations(active) {
-  const free = active.filter((v) => !v.rotateLocked);
+  const free = active.filter((v) => !v.orientLocked);
   if (free.length === 0) return;
 
   const dimsFor = (v, turned) => (turned ? [v.trim.h, v.trim.w] : [v.trim.w, v.trim.h]);
@@ -367,6 +369,9 @@ function chooseRotations(active) {
 export function fitViews(views, N) {
   const active = views.filter((v) => v.enabled && v.trim.w > 0);
   chooseRotations(active);
+  // Dimensions cannot tell a quarter turn from its opposite, so content has
+  // the last word on which way round each drawing goes.
+  alignViews(active);
 
   const none = { name: null, amount: 1 };
   if (active.length === 0) return { reduction: 1, extent: { x: 1, y: 1, z: 1 }, reconciled: false, worst: none };
