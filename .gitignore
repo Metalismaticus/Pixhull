@@ -6,8 +6,5 @@ Thumbs.db
 .claude/settings.local.json
 _tmp-*
 
-# studio: процесс живёт в папке, но не в репозитории
+# studio: плагин объявлен в папке, но в репозиторий не попадает
 .claude/settings.json
-.claude/skills/
-.claude/agents/
-.claude/studio/
