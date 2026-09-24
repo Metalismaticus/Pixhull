@@ -14,6 +14,7 @@ import { OrthoCamera, PITCH_PRESETS, directionYaws, DEG } from './gfx/camera.js'
 import { renderTurnaround, packSheet, snapToPalette, imageDataToPng, downloadBlob } from './export/sprite.js';
 import { exportObj } from './export/obj.js';
 import { exportVox, VOX_MAX_SIZE } from './export/vox.js';
+import { packSliceSheet, planSlices, SLICE_MAX_SHEET } from './export/slices.js';
 import { exportGlb } from './export/gltf.js';
 import { buildSmoothMesh } from './export/surfacenets.js';
 import { makeZip, blobBytes } from './export/zip.js';
@@ -583,6 +584,7 @@ async function build() {
   // that was never visible.
   refreshSlots();
   refreshVoxAvailability();
+  refreshSliceAvailability();
   state.dirty = true;
 
   // Ordered by how badly each one invalidates the result. A drawing in the
@@ -3431,6 +3433,36 @@ async function exportViewSheet() {
   }
 }
 
+/**
+ * The model as a stack of horizontal slices - the sheet a sprite-stacking
+ * engine wants, plus the JSON that says which cell is which layer.
+ *
+ * The colour rule is not this function's to choose: `packSliceSheet` asks
+ * `voxelColor`, the one rule the `.vox` export asks too.
+ */
+async function exportSlices() {
+  if (!state.volume) return;
+  status('status.meshing');
+  await nextFrame();
+  try {
+    const { image, meta, plan, stats } = packSliceSheet(state.volume, state.palette);
+    const png = await imageDataToPng(new ImageData(image.data, image.width, image.height));
+    downloadBlob(
+      makeZip([
+        { name: 'slices.png', data: await blobBytes(png) },
+        { name: 'slices.json', data: new TextEncoder().encode(JSON.stringify(meta, null, 2)) },
+      ]),
+      'pixhull-slices.zip'
+    );
+    status('status.exportedSlices', {
+      n: plan.count, w: plan.sliceW, h: plan.sliceH,
+      sw: plan.sheetW, sh: plan.sheetH, c: stats.colors,
+    });
+  } catch (err) {
+    status('status.badImage', { err: String(err instanceof Error ? err.message : err) }, 'error');
+  }
+}
+
 async function exportFrames() {
   if (!state.volume) return;
   status('status.rendering');
@@ -3516,6 +3548,26 @@ function refreshVoxAvailability() {
   button.disabled = tooBig;
   note.classList.toggle('hidden', !tooBig);
   if (tooBig) note.textContent = t('model.voxTooBig', { span, max: VOX_MAX_SIZE });
+}
+
+/**
+ * Grey out the slice sheet when it would not fit on a canvas.
+ *
+ * Same reasoning as the .vox ceiling above it, different number: a model 512
+ * voxels tall needs a sheet 11 776 px on a side, and no browser will give us
+ * one. Measured on the model's own bounding box, so a small model on a big
+ * grid exports fine.
+ */
+function refreshSliceAvailability() {
+  const note = $('slices-note');
+  const button = /** @type {HTMLButtonElement} */ ($('btn-export-slices'));
+  const plan = state.volume ? planSlices(state.volume) : null;
+  const tooBig = !!plan && !plan.fits;
+  button.disabled = tooBig;
+  note.classList.toggle('hidden', !tooBig);
+  if (tooBig) {
+    note.textContent = t('export.slicesTooBig', { w: plan.sheetW, h: plan.sheetH, max: SLICE_MAX_SHEET });
+  }
 }
 
 async function doExportVox() {
@@ -3772,6 +3824,7 @@ function retranslate() {
   // Carries numbers, so it is written by hand rather than by data-i18n and has
   // to be asked to rewrite itself.
   refreshVoxAvailability();
+  refreshSliceAvailability();
   refreshSelectionPanel();
   refreshMapPanel();
   // Every one of these writes a translated string by hand: view names inside a
@@ -4070,6 +4123,7 @@ function init() {
 
   $('btn-export-sheet').addEventListener('click', exportSheet);
   $('btn-export-views').addEventListener('click', exportViewSheet);
+  $('btn-export-slices').addEventListener('click', exportSlices);
   $('btn-export-frames').addEventListener('click', exportFrames);
   $('btn-export-obj').addEventListener('click', doExportObj);
   $('btn-export-glb').addEventListener('click', doExportGlb);

@@ -6,17 +6,17 @@
  * voxel carries **one** colour, and a Pixhull voxel carries six, one per face.
  * Something has to be thrown away, and which something matters.
  *
- * The rule here is a vote among the faces you can actually see. A tyre whose
- * visible faces are all black stays black even if a buried face is not; a body
- * panel takes the panel's colour rather than whatever happens to be on its
- * underside. Faces that no one can see get no vote, because keeping them would
- * let hidden geometry decide how the model looks.
+ * Which something is not decided here: `voxelColor` in `voxelcolor.js` is the
+ * one rule every flattening export obeys, so that a model does not look like
+ * two different models depending on which button was pressed. A `.vox` cube is
+ * seen from every side, so this export names no facing direction and takes the
+ * rule's vote among the faces you can actually see.
  *
  * The 256-entry palette is a happy accident: Pixhull's indexed palette is the
  * same size, so colours survive the trip exactly, with no requantisation.
  */
 
-import { DIRS } from '../core/volume.js';
+import { voxelColor } from './voxelcolor.js';
 
 /** MagicaVoxel refuses anything larger along any axis. */
 export const VOX_MAX_SIZE = 256;
@@ -70,35 +70,6 @@ function chunk(id, content) {
 }
 
 /**
- * The colour to give a voxel that has six of them: the most common among its
- * exposed faces.
- * @param {import('../core/volume.js').Volume} vol
- * @param {number} fallback
- * @returns {number} palette index 1..255
- */
-function voteColor(vol, x, y, z, fallback) {
-  /** @type {Map<number, number>} */
-  const votes = new Map();
-  let any = 0;
-  for (let d = 0; d < 6; d++) {
-    const [dx, dy, dz] = DIRS[d];
-    const c = vol.getFace(x, y, z, d);
-    if (c !== 0 && any === 0) any = c;
-    if (vol.get(x + dx, y + dy, z + dz)) continue; // buried faces get no vote
-    if (c === 0) continue;
-    votes.set(c, (votes.get(c) ?? 0) + 1);
-  }
-  let best = 0;
-  let bestN = 0;
-  for (const [c, n] of votes) {
-    if (n > bestN) { bestN = n; best = c; }
-  }
-  // Fully enclosed voxels have no visible face at all; they still have to be
-  // written, so fall back to any colour they carry, then to the model's.
-  return best || any || fallback;
-}
-
-/**
  * @param {import('../core/volume.js').Volume} volume
  * @param {import('../core/palette.js').Palette} palette
  * @returns {{bytes: Uint8Array, stats: {voxels: number, colors: number, size: [number, number, number]}}}
@@ -122,7 +93,7 @@ export function exportVox(volume, palette) {
   let count = 0;
   const used = new Set();
   volume.forEachSolid((x, y, z) => {
-    const c = voteColor(volume, x, y, z, fallback);
+    const c = voxelColor(volume, x, y, z, { fallback });
     used.add(c);
     // MagicaVoxel is Z-up; Pixhull is Y-up.
     xyzi.u8(x - box.min[0]);
