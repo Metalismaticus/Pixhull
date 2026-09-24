@@ -42,10 +42,21 @@ function writeVoxel(vol, x, y, z, s) {
  */
 
 /**
- * One undoable step. Entries are tagged because the stack now carries two
- * unrelated kinds of change, and undo has to know which object to write to.
+ * @typedef {{ids: Int32Array, offsets: Int32Array, before: Uint8Array, changed: number}} FaceRecord
+ * @typedef {ReturnType<import('../core/palette.js').Palette['snapshot']>} PaletteState
+ */
+
+/**
+ * One undoable step. Entries are tagged because the stack carries unrelated
+ * kinds of change, and undo has to know which object to write to.
+ *
+ * A merge is its own kind for a reason: it rewrites face bytes *and* the
+ * palette, and it is many-to-one, so it cannot be undone by running the map
+ * backwards. It carries the old face bytes and both palette states instead.
  * @typedef {{kind: 'voxels', map: StrokeMap}
- *   | {kind: 'palette', index: number, before: number, after: number}} Entry
+ *   | {kind: 'palette', index: number, before: number, after: number}
+ *   | {kind: 'merge', remap: Uint8Array, record: FaceRecord,
+ *      before: PaletteState, after: PaletteState}} Entry
  */
 
 export class History {
@@ -125,6 +136,26 @@ export class History {
     this.paletteDrag = null;
   }
 
+  /**
+   * Record a palette merge: freed slots, remapped face bytes and all.
+   *
+   * Never coalesced with anything. A merge is a deliberate one-off, and the
+   * user who presses Ctrl+Z after it means that operation, not the stroke
+   * before it.
+   *
+   * @param {Uint8Array} remap the map that was applied
+   * @param {FaceRecord} record every face byte it changed, as it was
+   * @param {PaletteState} before palette before the merge
+   * @param {PaletteState} after palette after it
+   */
+  pushMerge(remap, record, before, after) {
+    this.stack.length = this.cursor; // a new step drops the redo tail
+    this.stack.push({ kind: 'merge', remap, record, before, after });
+    if (this.stack.length > this.limit) this.stack.shift();
+    this.cursor = this.stack.length;
+    this.paletteDrag = null;
+  }
+
   /** Open a stroke. Safe to call when one is already open. */
   begin() {
     if (!this.pending) this.pending = new Map();
@@ -173,12 +204,21 @@ export class History {
   /**
    * @param {import('../core/volume.js').Volume} vol
    * @param {import('../core/palette.js').Palette} [palette]
-   * @returns {'voxels'|'palette'|null} what was undone, so the caller knows
-   *   whether geometry or only the palette texture has to be refreshed
+   * @returns {'voxels'|'palette'|'merge'|null} what was undone, so the caller
+   *   knows whether geometry, only the palette texture, or both have to be
+   *   refreshed
    */
   undo(vol, palette) {
     if (!this.canUndo) return null;
     const entry = this.stack[this.cursor - 1];
+    if (entry.kind === 'merge') {
+      if (!palette) return null;
+      this.cursor--;
+      vol.restoreFaces(entry.record);
+      palette.restore(entry.before);
+      this.paletteDrag = null;
+      return 'merge';
+    }
     if (entry.kind === 'palette') {
       // Without the palette there is nothing to write to; leave the cursor
       // where it is rather than silently dropping the step.
@@ -197,11 +237,21 @@ export class History {
   /**
    * @param {import('../core/volume.js').Volume} vol
    * @param {import('../core/palette.js').Palette} [palette]
-   * @returns {'voxels'|'palette'|null}
+   * @returns {'voxels'|'palette'|'merge'|null}
    */
   redo(vol, palette) {
     if (!this.canRedo) return null;
     const entry = this.stack[this.cursor];
+    if (entry.kind === 'merge') {
+      if (!palette) return null;
+      this.cursor++;
+      // Applying the same map again lands on the same bytes: the faces are back
+      // to what they were when it was first applied, and the map is a function.
+      vol.remapFaces(entry.remap);
+      palette.restore(entry.after);
+      this.paletteDrag = null;
+      return 'merge';
+    }
     if (entry.kind === 'palette') {
       if (!palette) return null;
       this.cursor++;

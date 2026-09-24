@@ -188,7 +188,7 @@ function toolCarveViews(args) {
       'grid: ' + grid + '^3',
       'voxels: ' + volume.solidCount,
       'extent: ' + extent + ' (x, y up, z toward the front view)',
-      'palette: ' + (palette.size - 1) + ' colours' + (palette.overflowed ? ' (art had more; extras snapped to the nearest)' : ''),
+      'palette: ' + palette.live + ' colours' + (palette.overflowed ? ' (art had more; extras snapped to the nearest)' : ''),
       reduction > 1.001 ? 'art reduced ' + reduction.toFixed(2) + 'x to fit the grid' : 'art used at one pixel per voxel',
       stats.mirrored.length ? 'mirrored from the opposite view: ' + stats.mirrored.join(', ') : 'all six views supplied',
       'carved in ' + stats.ms.toFixed(0) + ' ms',
@@ -305,7 +305,11 @@ function toolExportModel(args) {
         pivotX: meta.pivots[i].x,
         pivotY: meta.pivots[i].y,
       })),
-      palette: palette.colors.slice(1).map((c) => '#' + c.toString(16).padStart(6, '0')),
+      // Live slots only, the same rule as the browser's sprites.json
+      // (`src/main.js`): a merged palette has holes, and a hole reads as
+      // #000000 - a colour that was never in the art. Merging cannot happen in
+      // MCP today, so this is one obligation in one place rather than a fix.
+      palette: palette.slots().map((i) => palette.hex(i)),
     };
     files.push(write(name + '-sprites.json', JSON.stringify(metadata, null, 2)));
 

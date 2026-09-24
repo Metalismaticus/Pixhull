@@ -316,6 +316,75 @@ export class Volume {
     return { counts, complete };
   }
 
+  /**
+   * Rewrite every face byte through a 256-entry map.
+   *
+   * This is the model side of a palette merge: the palette says "slot 91 is now
+   * slot 12", and every face wearing 91 has to be told. Nothing else about the
+   * model changes - occupancy, geometry and face directions are untouched, only
+   * the byte naming the colour.
+   *
+   * The record is what makes the operation undoable. A merge is many-to-one, so
+   * the map cannot be inverted: only the old byte of each face that changed says
+   * where it came from. That costs nine bytes per changed face and nothing per
+   * face left alone, which is why a merge of two near-identical shades on a
+   * large model is measured in kilobytes rather than in the whole volume.
+   *
+   * @param {Uint8Array} remap 256 entries; `remap[i] === i` means "leave alone"
+   * @returns {{changed: number, ids: Int32Array, offsets: Int32Array, before: Uint8Array}}
+   */
+  remapFaces(remap) {
+    /** @type {number[]} */
+    const ids = [];
+    /** @type {number[]} */
+    const offsets = [];
+    /** @type {number[]} */
+    const before = [];
+
+    for (const [id, c] of this.chunks) {
+      const faces = c.faces;
+      if (faces === null) continue;
+      let touched = false;
+      for (let o = 0; o < faces.length; o++) {
+        const was = faces[o];
+        const now = remap[was];
+        if (now === was) continue;
+        ids.push(id);
+        offsets.push(o);
+        before.push(was);
+        faces[o] = now;
+        touched = true;
+      }
+      // One dirty mark per chunk, not per face: the renderer rebuilds a chunk
+      // as a whole either way.
+      if (touched) this.dirty.add(id);
+    }
+
+    return {
+      changed: before.length,
+      ids: Int32Array.from(ids),
+      offsets: Int32Array.from(offsets),
+      before: Uint8Array.from(before),
+    };
+  }
+
+  /**
+   * Put back exactly the face bytes a `remapFaces` record took away.
+   * @param {{ids: Int32Array, offsets: Int32Array, before: Uint8Array}} record
+   * @returns {number} how many bytes were written back
+   */
+  restoreFaces(record) {
+    let n = 0;
+    for (let k = 0; k < record.before.length; k++) {
+      const c = this.chunks.get(record.ids[k]);
+      if (c === undefined) continue;
+      c.paint()[record.offsets[k]] = record.before[k];
+      this.dirty.add(record.ids[k]);
+      n++;
+    }
+    return n;
+  }
+
   /** @returns {{min: [number,number,number], max: [number,number,number]}|null} */
   bounds() {
     if (this.solidCount === 0) return null;

@@ -40,7 +40,7 @@ const GEOMETRY_FROM = 0.8;
  * @typedef {Object} CarveJobResult
  * @property {ReturnType<Volume['pack']>} volume
  * @property {{buffer: ArrayBuffer, count: number}} faces instances for the renderer
- * @property {{colors: number[], aliases: Int32Array, overflowed: boolean}} palette
+ * @property {ReturnType<import('./palette.js').Palette['snapshot']>} palette
  * @property {import('./carve.js').CarveStats} stats
  * @property {{min: number[], max: number[]}|null} box
  * @property {ArrayBuffer[]} transfer buffers to hand over rather than copy

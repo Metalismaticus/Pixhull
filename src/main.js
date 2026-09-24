@@ -3,7 +3,7 @@
  * App wiring: source views in, voxels out, sprites and OBJ out the other side.
  */
 
-import { Palette, PALETTE_MAX } from './core/palette.js';
+import { Palette, MERGE_DELTA_E } from './core/palette.js';
 import { SourceView, VIEW_NAMES, suggestGridSize, fitViews } from './core/views.js';
 import { decodeImage, toImageData } from './ui/decode.js';
 import { startBuild, cancelBuild } from './ui/build-task.js';
@@ -24,6 +24,7 @@ import { History } from './edit/history.js';
 import { applyTool, boxExtent, applyBox, collectFillRegion, mirrorX } from './edit/tools.js';
 import { boxEdges, faceEdges, regionOutline, brushExtent, addSeed, joinLines } from './edit/preview.js';
 import { paletteBands, paletteOrder } from './edit/palette-order.js';
+import { mergeOffer } from './edit/merge-offer.js';
 import { strokeSamples, strokeStepPx } from './edit/stroke.js';
 import { serializeVolume, deserializeVolume } from './core/serialize.js';
 
@@ -370,6 +371,7 @@ function dropBuild() {
   cancelBuild();
   state.building = false;
   showBuildProgress(null);
+  refreshMergeOffer();
 }
 
 /**
@@ -414,6 +416,9 @@ async function build() {
 
   state.building = true;
   showBuildProgress(0, 'sample');
+  // The merge button acts on the model the build is about to replace, so it goes
+  // dark for the duration and says why.
+  refreshMergeOffer();
   /** @type {import('./ui/build-task.js').BuildResult} */
   let built;
   try {
@@ -424,6 +429,7 @@ async function build() {
     if (err instanceof Error && /** @type {any} */ (err).cancelled) return;
     state.building = false;
     showBuildProgress(null);
+    refreshMergeOffer();
     status('status.buildFailed', { err: String(err instanceof Error ? err.message : err) }, 'error');
     return;
   }
@@ -522,7 +528,7 @@ function updateStats(stats, faces, bounds) {
     ['stats.voxels', num(stats.solid)],
     ['stats.faces', num(faces)],
     ['stats.extent', size],
-    ['stats.palette', String(state.palette.size - 1)],
+    ['stats.palette', String(state.palette.live)],
     ['stats.inferred', num(stats.inferred)],
   ];
   if (stats.mirrored.length > 0) rows.push(['stats.mirrored', String(stats.mirrored.length)]);
@@ -854,6 +860,7 @@ function applyUsage() {
     b.title = swatchTitle(i);
   }
   updatePaletteFoot();
+  refreshMergeOffer();
 }
 
 /**
@@ -888,6 +895,9 @@ function refreshPalette() {
   const host = $('palette-box');
   host.innerHTML = '';
   if (state.color >= state.palette.size) state.color = Math.max(1, state.palette.size - 1);
+  // A merged palette has holes in it - after a load or an undo the selection can
+  // be sitting on one, and a hole has no swatch to select.
+  if (!state.palette.has(state.color)) state.color = state.palette.slots()[0] ?? 1;
 
   const empty = state.palette.size <= 1;
   host.classList.toggle('empty', empty);
@@ -906,7 +916,7 @@ function refreshPalette() {
     }
   }
 
-  $('palette-full-note').classList.toggle('hidden', state.palette.size < PALETTE_MAX);
+  $('palette-full-note').classList.toggle('hidden', !state.palette.full);
   applyUsage();
 }
 
@@ -1023,9 +1033,104 @@ function applyRecolour() {
   state.history.pushPalette(recolourSlot, recolourBefore, state.palette.colors[recolourSlot] | 0);
   renderer.setPalette(state.palette);
   updateSwatch(recolourSlot);
+  // A recolour moves one colour in Lab, so the near-duplicate pairs are not the
+  // ones the panel promised a moment ago: measured, #ff8844 + #fe8845 offered
+  // "free 1 slot", and recolouring the second to #0078ff left the offer lit
+  // while the pair had drifted to dE 52.7. The plan is what the click applies,
+  // so it is recomputed here rather than on the press. The undo/redo path gets
+  // this through `refreshPalette()` already.
+  refreshMergeOffer();
   state.dirty = true;
   refreshHistoryButtons();
   status('status.colorReplaced', { n: recolourSlot, hex: state.palette.hex(recolourSlot) });
+}
+
+/**
+ * What a merge would free right now, or null when there is no palette.
+ *
+ * Kept as state rather than recomputed on the click, because the button has to
+ * say whether it would do anything before it is pressed - and because the plan
+ * is what the click applies, so the user cannot get a different answer from the
+ * one the panel just promised.
+ * @type {{remap: Uint8Array, freed: number[], groups: number, worst: number} | null}
+ */
+let mergePlan = null;
+
+/**
+ * Light or dim the merge button and say why, in one line for the pair.
+ *
+ * The plan is built against the usage counts when they are complete, so the
+ * colour painting more of the model is the one that keeps its index. Without
+ * counts it falls back to index order, which is still deterministic.
+ */
+function refreshMergeOffer() {
+  const btn = /** @type {HTMLButtonElement} */ ($('btn-merge-colors'));
+  const note = $('merge-note');
+  const offer = mergeOffer({
+    palette: state.palette,
+    volume: state.volume,
+    building: state.building,
+    deltaE: MERGE_DELTA_E,
+    weights: usage.measured && usage.complete ? usage.counts : undefined,
+  });
+  mergePlan = offer.plan;
+  btn.disabled = !offer.enabled;
+  note.textContent = offer.noteKey ? t(offer.noteKey, offer.noteParams) : '';
+  // A reason for something being off wears `.hint.warn`; a plain `.hint` is for
+  // a hint about something that works (`docs/DESIGN.md` §8).
+  note.classList.toggle('warn', offer.warn);
+}
+
+/**
+ * Fuse every pair of slots nobody can tell apart, and hand the slots back.
+ *
+ * Two halves that have to happen together: the face bytes go through the map
+ * (`Volume.remapFaces`) and the palette frees the slots the map emptied. One
+ * without the other leaves faces pointing at a hole.
+ *
+ * Undoable as one step. It has to be: the operation rewrites face bytes across
+ * the whole model, and an operation that quietly throws hand work away is the
+ * defect the rebuild guard was built to end.
+ */
+function mergeColors() {
+  // The button is dark in all three cases (`refreshMergeOffer`), so these are
+  // the keyboard and the stale-plan paths rather than the ordinary ones. They
+  // still answer out loud: silence on a press is the defect this pair had.
+  if (state.building) {
+    status('status.buildRunning', undefined, 'warn');
+    return;
+  }
+  if (!state.volume) {
+    status('status.noModel', undefined, 'warn');
+    return;
+  }
+  if (!mergePlan || mergePlan.freed.length === 0) {
+    status('status.noNearDuplicates', undefined, 'warn');
+    return;
+  }
+  const plan = mergePlan;
+  const before = state.palette.snapshot();
+  const record = state.volume.remapFaces(plan.remap);
+  const freed = state.palette.applyMerge(plan);
+  state.history.pushMerge(plan.remap, record, before, state.palette.snapshot());
+
+  // The selection can be one of the slots that just went away; it follows its
+  // colour rather than pointing at a hole.
+  if (!state.palette.has(state.color)) state.color = plan.remap[state.color] || 1;
+
+  renderer.setPalette(state.palette);
+  // Every face instance carries its palette byte, so the buffer is stale.
+  state.geometryDirty = true;
+  refreshPalette();
+  scheduleUsage();
+  state.dirty = true;
+  refreshHistoryButtons();
+  status('status.colorsMerged', {
+    n: freed,
+    g: plan.groups,
+    faces: record.changed,
+    free: state.palette.free.size,
+  });
 }
 
 function refreshHistoryButtons() {
@@ -1201,13 +1306,21 @@ function redo() {
  * every voxel and every face byte exactly where they were, so rebuilding the
  * face buffer for it would cost the whole model's worth of work to show a
  * 1 KB texture change.
- * @param {'voxels'|'palette'} kind
+ * A merge is both at once: it freed slots and rewrote the face bytes that named
+ * them, so the texture, the panel and the face buffer all have to be redone.
+ * @param {'voxels'|'palette'|'merge'} kind
  */
 function afterHistoryStep(kind) {
-  if (kind === 'palette') {
+  if (kind === 'palette' || kind === 'merge') {
     renderer.setPalette(state.palette);
+    // Undoing a merge brings a freed slot back; redoing one takes it away
+    // again, and the selection must never sit on a hole.
+    if (!state.palette.has(state.color)) state.color = 1;
     refreshPalette();
-  } else {
+  }
+  // A recoloured slot leaves every face byte where it was; a merge and a stroke
+  // both rewrote bytes, so their face buffer is stale.
+  if (kind !== 'palette') {
     state.geometryDirty = true;
     scheduleUsage();
   }
@@ -1739,7 +1852,9 @@ async function exportFrames() {
         pivotX: meta.pivots[i].x,
         pivotY: meta.pivots[i].y,
       })),
-      palette: state.palette.colors.slice(1).map((c) => '#' + c.toString(16).padStart(6, '0')),
+      // Live slots only: a merged palette has holes, and a hole reads as
+      // #000000 - a colour that was never in the art.
+      palette: state.palette.slots().map((i) => state.palette.hex(i)),
     };
     files.push({ name: 'sprites.json', data: new TextEncoder().encode(JSON.stringify(json, null, 2)) });
 
@@ -2112,18 +2227,22 @@ function init() {
     recolourSlot = 0;
   });
 
+  $('btn-merge-colors').addEventListener('click', mergeColors);
+
   $('btn-add-color').addEventListener('click', () => {
     const hex = /** @type {HTMLInputElement} */ ($('new-color')).value;
     const n = parseInt(hex.slice(1), 16);
-    const before = state.palette.size;
+    // "Full" is now a question about free slots, not about length: a merge can
+    // leave holes inside a palette that is still 256 entries long.
+    const wasFull = state.palette.full;
     const idx = state.palette.add((n >> 16) & 255, (n >> 8) & 255, n & 255);
     state.color = idx;
     renderer.setPalette(state.palette);
     refreshPalette();
     scheduleUsage();
     state.dirty = true;
-    if (state.palette.size === before && state.palette.overflowed) status('status.paletteFull', undefined, 'warn');
-    else status('status.colorAdded', { n: state.palette.size - 1 });
+    if (wasFull) status('status.paletteFull', undefined, 'warn');
+    else status('status.colorAdded', { n: state.palette.live });
   });
 
   $('btn-theme').addEventListener('click', () => {

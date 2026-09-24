@@ -72,10 +72,12 @@ export function bandOf(packed) {
 /**
  * Slot indices grouped into bands, dark to light inside each band.
  *
- * Slot 0 is the reserved empty entry and is left out. Empty bands are dropped,
- * so the caller can draw one gap between every pair of returned bands.
+ * Slot 0 is the reserved empty entry and is left out, and so is every slot a
+ * merge freed: it holds no colour, and a swatch for it would be a black square
+ * standing for nothing. Empty bands are dropped, so the caller can draw one gap
+ * between every pair of returned bands.
  *
- * @param {{colors: number[]}} palette
+ * @param {{colors: number[], free?: Set<number>}} palette
  * @returns {number[][]}
  */
 export function paletteBands(palette) {
@@ -84,6 +86,7 @@ export function paletteBands(palette) {
   for (let b = 0; b <= HUE_BANDS; b++) bands.push([]);
 
   for (let i = 1; i < palette.colors.length; i++) {
+    if (palette.free && palette.free.has(i)) continue;
     bands[bandOf(palette.colors[i] | 0)].push(i);
   }
 
@@ -102,7 +105,7 @@ export function paletteBands(palette) {
 
 /**
  * The shown order as one flat list - what the arrow keys walk.
- * @param {{colors: number[]}} palette
+ * @param {{colors: number[], free?: Set<number>}} palette
  * @returns {number[]}
  */
 export function paletteOrder(palette) {
