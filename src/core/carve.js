@@ -155,6 +155,18 @@ export function carve(views, N, palette, opts = {}) {
 
   /** @type {Record<string, {mask: Uint8Array, color: Uint8Array}>} */
   const raster = {};
+  /**
+   * Each view's own proportions, taken from the trimmed drawing rather than
+   * from the grid: placement squashes views to the solved extents, so by the
+   * time a raster exists two different drawings can share a box and one
+   * drawing used twice can be in two boxes. The diagnosis needs the drawing.
+   * @type {Record<string, number>}
+   */
+  const proportions = {};
+  for (const v of views) {
+    if (!v.enabled || v.trim.w === 0 || v.trim.h === 0) continue;
+    proportions[v.name] = v.trim.w / v.trim.h;
+  }
   for (const name of active) {
     const { mask, rgb } = sampled[name];
     const color = new Uint8Array(mask.length);
@@ -173,7 +185,7 @@ export function carve(views, N, palette, opts = {}) {
 
   // Before mirroring: a synthesised view is a copy of its opposite by
   // construction, and comparing against it would only ever confirm that.
-  const lookalikes = findLookalikeViews(raster, N);
+  const lookalikes = findLookalikeViews(raster, N, proportions);
 
   const mFront = raster.front?.mask;
   const mBack = raster.back?.mask;

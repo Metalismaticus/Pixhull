@@ -14,27 +14,41 @@ const TYRE = '#23262e';
 const LIGHT = '#ffd76e';
 
 /**
+ * Painted straight into an RGBA8 buffer rather than onto a canvas.
+ *
+ * Keeping the demo free of the DOM is what lets a check import it: the false
+ * "these two drawings are the same" warning the demo used to raise could only
+ * be pinned down by carving the demo itself, and `document` does not exist in
+ * Node. `toImageData` promotes the result wherever a real ImageData is needed.
+ *
  * @param {number} w @param {number} h
  * @param {Array<[number, number, number, number, string]>} rects x, y, w, h, colour
- * @returns {ImageData}
+ * @returns {{width: number, height: number, data: Uint8ClampedArray}}
  */
 function paint(w, h, rects) {
-  const canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  if (!ctx) throw new Error('2D canvas unavailable');
-  ctx.imageSmoothingEnabled = false;
+  const data = new Uint8ClampedArray(w * h * 4);
   for (const [x, y, rw, rh, color] of rects) {
-    ctx.fillStyle = color;
-    ctx.fillRect(x, y, rw, rh);
+    const r = parseInt(color.slice(1, 3), 16);
+    const g = parseInt(color.slice(3, 5), 16);
+    const b = parseInt(color.slice(5, 7), 16);
+    for (let j = Math.max(0, y); j < Math.min(h, y + rh); j++) {
+      for (let i = Math.max(0, x); i < Math.min(w, x + rw); i++) {
+        const k = (j * w + i) * 4;
+        data[k] = r;
+        data[k + 1] = g;
+        data[k + 2] = b;
+        data[k + 3] = 255;
+      }
+    }
   }
-  return ctx.getImageData(0, 0, w, h);
+  return { width: w, height: h, data };
 }
 
 /**
  * The car points along +Z, which is toward the front camera.
- * @returns {{front: ImageData, right: ImageData, top: ImageData}}
+ * @returns {{front: {width: number, height: number, data: Uint8ClampedArray},
+ *   right: {width: number, height: number, data: Uint8ClampedArray},
+ *   top: {width: number, height: number, data: Uint8ClampedArray}}}
  */
 export function buildDemoViews() {
   // Seen from the side: 24 long, 12 tall.
