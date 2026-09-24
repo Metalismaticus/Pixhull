@@ -170,6 +170,88 @@ export function addSeed(hit) {
 }
 
 /**
+ * How far either side of the cursor the cell grid reaches, in cells.
+ *
+ * 16 gives a 33x33 patch: 68 segments, 136 vertices, cheap enough to rebuild
+ * whenever the cell under the cursor changes. Drawing the grid over the whole
+ * volume is what this replaces - on 256 cubed that would be some two hundred
+ * thousand lines, and at any zoom that fits the model on screen a cell is
+ * finer than a pixel.
+ */
+export const GRID_RADIUS = 16;
+
+/**
+ * A patch of cell lines lying in the plane of one face.
+ *
+ * The plane is nudged `lift` outwards along the face normal so the lines do
+ * not fight the surface they describe for the depth buffer; without it the
+ * grid flickers in and out as the camera turns.
+ *
+ * @param {{x: number, y: number, z: number, face: number}} hit
+ * @param {[number, number, number]} dims
+ * @param {number} [radius]
+ * @param {number} [lift]
+ * @returns {Float32Array} 2 vertices per line
+ */
+export function cellGrid(hit, dims, radius = GRID_RADIUS, lift = 0.02) {
+  const { axis, plane, u, v, base } = facePlane(hit.x, hit.y, hit.z, hit.face);
+  const n = DIRS[hit.face];
+  const at = plane + n[axis] * lift;
+
+  const u0 = Math.max(0, base[u] - radius);
+  const u1 = Math.min(dims[u], base[u] + radius + 1);
+  const v0 = Math.max(0, base[v] - radius);
+  const v1 = Math.min(dims[v], base[v] + radius + 1);
+  if (u1 <= u0 || v1 <= v0) return new Float32Array(0);
+
+  const lines = (u1 - u0 + 1) + (v1 - v0 + 1);
+  const out = new Float32Array(lines * 6);
+  let i = 0;
+  /** @param {number} a @param {number} b @param {number} c @param {number} d */
+  const push = (a, b, c, d) => {
+    const p = [0, 0, 0];
+    p[axis] = at;
+    p[u] = a; p[v] = b;
+    out.set(p, i); i += 3;
+    p[u] = c; p[v] = d;
+    out.set(p, i); i += 3;
+  };
+  for (let a = u0; a <= u1; a++) push(a, v0, a, v1);
+  for (let b = v0; b <= v1; b++) push(u0, b, u1, b);
+  return out;
+}
+
+/**
+ * The two diagonals of one face of a cuboid.
+ *
+ * How an armed face says it is armed. A second colour would be the plain way
+ * to mark it and is not available: the line painter takes one colour per call,
+ * and a second accent on screen is forbidden (`docs/DESIGN.md`, section 2).
+ *
+ * @param {[number, number, number]} min
+ * @param {[number, number, number]} max inclusive, in voxel coordinates
+ * @param {number} face
+ * @returns {Float32Array} 4 vertices
+ */
+export function faceDiagonals(min, max, face) {
+  const axis = face >> 1;
+  const u = (axis + 1) % 3;
+  const v = (axis + 2) % 3;
+  const at = face % 2 === 0 ? max[axis] + 1 : min[axis];
+  /** @param {number} du @param {number} dv @returns {number[]} */
+  const corner = (du, dv) => {
+    const p = [0, 0, 0];
+    p[axis] = at;
+    p[u] = du ? max[u] + 1 : min[u];
+    p[v] = dv ? max[v] + 1 : min[v];
+    return p;
+  };
+  const out = new Float32Array(12);
+  [corner(0, 0), corner(1, 1), corner(1, 0), corner(0, 1)].forEach((p, i) => out.set(p, i * 3));
+  return out;
+}
+
+/**
  * Join several vertex lists into the one buffer the renderer draws.
  * @param {Float32Array[]} parts
  * @returns {Float32Array}

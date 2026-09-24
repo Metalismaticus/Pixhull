@@ -82,6 +82,27 @@
     <div class="toolbar" id="tool-bar" role="radiogroup" data-i18n-aria="edit.heading"></div>
     <p class="hint" id="tool-hint"></p>
 
+    <!-- The block a box drag leaves behind. It takes no room until there is a
+         selection: a permanent 118px gap in the densest column would cost more
+         than the controls below shifting down when one appears. -->
+    <div class="selection-block hidden" id="selection-block">
+      <div class="field">
+        <label data-i18n="edit.selection"></label>
+        <span class="unit mono" id="selection-size">1×1×1</span>
+      </div>
+      <p class="readout" id="selection-figures"></p>
+      <div class="field selection-actions">
+        <button id="btn-box-fill" class="ghost small" type="button" data-i18n="edit.boxFill"></button>
+        <button id="btn-box-delete" class="ghost small" type="button" data-i18n="edit.boxDelete"></button>
+        <button id="btn-box-paint" class="ghost small" type="button" data-i18n="edit.boxPaint"></button>
+      </div>
+      <div class="field">
+        <button id="btn-box-clear" class="ghost small" type="button" data-i18n="edit.boxClear"></button>
+      </div>
+      <p class="hint warn hidden" id="selection-note"></p>
+      <p class="hint" data-i18n="edit.boxKeys"></p>
+    </div>
+
     <div class="field">
       <label for="brush-size" data-i18n="edit.brush"></label>
       <input type="range" id="brush-size" min="0" max="4" step="1" value="0">
@@ -161,6 +182,7 @@
       <input type="checkbox" id="bounds-toggle" checked>
       <label for="bounds-toggle" data-i18n="view.bounds"></label>
     </div>
+    <p class="hint" id="bounds-hint"></p>
     <div class="field checkbox">
       <input type="checkbox" id="mirror-toggle" checked>
       <label for="mirror-toggle" data-i18n="view.mirror"></label>

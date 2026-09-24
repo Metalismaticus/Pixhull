@@ -173,6 +173,17 @@ export class Renderer {
     gl.bindVertexArray(null);
     this.boxVertexCount = 0;
 
+    // The cell grid under the cursor: same colour as the volume's wireframe,
+    // because it marks out space rather than promising an edit.
+    this.gridVao = gl.createVertexArray();
+    this.gridBuffer = gl.createBuffer();
+    gl.bindVertexArray(this.gridVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.gridBuffer);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+    this.gridVertexCount = 0;
+
     // A second wireframe, for whatever the armed tool is about to touch.
     this.previewVao = gl.createVertexArray();
     this.previewBuffer = gl.createBuffer();
@@ -309,6 +320,22 @@ export class Renderer {
   }
 
   /**
+   * The cell grid patch, in voxel coordinates. Built in `src/edit/preview.js`
+   * for the same reason as the tool outlines: it can be counted in Node.
+   * @param {Float32Array} positions
+   */
+  setGridLines(positions) {
+    const gl = this.gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.gridBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
+    this.gridVertexCount = (positions.length / 3) | 0;
+  }
+
+  clearGrid() {
+    this.gridVertexCount = 0;
+  }
+
+  /**
    * Match the drawing buffer to the element size.
    * @param {number} dpr
    * @returns {boolean} true when the size changed
@@ -420,6 +447,21 @@ export class Renderer {
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.bindVertexArray(this.boxVao);
       gl.drawArrays(gl.LINES, 0, this.boxVertexCount);
+      gl.bindVertexArray(null);
+      gl.disable(gl.BLEND);
+    }
+
+    // Same switch as the wireframe, and the same colour: one control, because
+    // both answer "show me the space the model sits in".
+    if (opts.showBounds && this.gridVertexCount > 0) {
+      gl.disable(gl.CULL_FACE);
+      gl.useProgram(this.boxProgram);
+      gl.uniformMatrix4fv(this.boxU.uViewProj, false, vp);
+      gl.uniform4f(this.boxU.uColor, this.boundsColor[0], this.boundsColor[1], this.boundsColor[2], this.boundsColor[3]);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.bindVertexArray(this.gridVao);
+      gl.drawArrays(gl.LINES, 0, this.gridVertexCount);
       gl.bindVertexArray(null);
       gl.disable(gl.BLEND);
     }

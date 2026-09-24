@@ -596,6 +596,52 @@ input[type="color"] {
 .history-row { gap: 4px; }
 .history-row button { flex: 1 1 0; }
 
+/*
+ * The selection block. It appears with a block and goes with it, so it keeps
+ * the column's usual 10px rhythm on both sides rather than a reserved hole.
+ */
+/*
+ * The block keeps the vertical rhythm of the specification (section 4) rather
+ * than one flat gap: the figures belong to the size above them (4 px), the
+ * three actions are a new thought (10 px), and what follows them - the way out
+ * and the two notes - hangs off the actions at 6 px.
+ */
+.selection-block {
+  display: grid;
+  gap: 0;
+  margin: 10px 0;
+}
+.selection-block.hidden { display: none; }
+.selection-block .field { margin: 0; }
+.selection-block .readout { margin-top: 4px; }
+.selection-block .selection-actions { margin-top: 10px; }
+.selection-block .selection-actions ~ * { margin-top: 6px; }
+.selection-actions { gap: 6px; }
+.selection-actions button { flex: 1 1 0; min-height: 24px; }
+#btn-box-clear { min-height: 24px; }
+
+/*
+ * One line of numbers that change under the eye, so monospaced (section 3 of
+ * `docs/DESIGN.md`). Not `.hint`, which is proportional; not `.stats`, which is
+ * pinned to the bottom of the panel and draws a rule above itself.
+ */
+.readout {
+  margin: 0;
+  min-height: 16px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A size that changes digit by digit has to hold still while it does. */
+.unit.mono { font-family: var(--mono); }
+
+/* Every button says where the keyboard is, not only the ones in the toolbar. */
+button.ghost:focus-visible { outline: 1px solid var(--accent-dim); outline-offset: 0; }
+
 input[type="range"] {
   flex: 1 1 auto;
   min-width: 0;
@@ -603,9 +649,11 @@ input[type="range"] {
 }
 
 /* The cursor tells you which tool is armed before you click. */
-#gl.tool-paint, #gl.tool-fill, #gl.tool-add { cursor: crosshair; }
+#gl.tool-paint, #gl.tool-fill, #gl.tool-add, #gl.tool-box { cursor: crosshair; }
 #gl.tool-erase { cursor: cell; }
 #gl.tool-pick { cursor: copy; }
+/* A face of the block is armed: it will move, not start a new block. */
+#gl.box-handle { cursor: move; }
 
 /* ---------------------------------------------------------- sheet slicing */
 

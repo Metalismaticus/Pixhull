@@ -13,44 +13,7 @@
 import { DIRS } from '../core/volume.js';
 import { addSeed } from './preview.js';
 
-export const TOOLS = /** @type {const} */ (['paint', 'fill', 'erase', 'add', 'pick', 'box', 'boxErase']);
-
-/**
- * The cuboid a box drag covers.
- *
- * It lives in the plane of the face you started on and extrudes along that
- * face's normal: outward when adding, inward when removing, which is the only
- * reading that does not surprise you. Depth comes from the brush control, so
- * there is no extra slider for it.
- *
- * @param {{x: number, y: number, z: number, face: number}} anchor where the drag began
- * @param {[number, number, number]} corner the far corner, in voxel coordinates
- * @param {number} depth voxels along the normal, at least 1
- * @param {boolean} outward true for add, false for erase
- * @returns {{min: [number, number, number], max: [number, number, number]}}
- */
-export function boxExtent(anchor, corner, depth, outward) {
-  const axis = anchor.face >> 1;
-  const n = DIRS[anchor.face];
-  const a = [anchor.x, anchor.y, anchor.z];
-
-  const min = /** @type {[number, number, number]} */ ([0, 0, 0]);
-  const max = /** @type {[number, number, number]} */ ([0, 0, 0]);
-
-  for (let i = 0; i < 3; i++) {
-    if (i === axis) continue;
-    min[i] = Math.min(a[i], corner[i]);
-    max[i] = Math.max(a[i], corner[i]);
-  }
-
-  // Adding starts one voxel outside the face; erasing starts at the face itself.
-  const start = a[axis] + (outward ? n[axis] : 0);
-  const end = start + n[axis] * (Math.max(1, depth) - 1) * (outward ? 1 : -1);
-  min[axis] = Math.min(start, end);
-  max[axis] = Math.max(start, end);
-
-  return { min, max };
-}
+export const TOOLS = /** @type {const} */ (['paint', 'fill', 'erase', 'add', 'pick', 'box']);
 
 /**
  * @param {import('../core/volume.js').Volume} vol

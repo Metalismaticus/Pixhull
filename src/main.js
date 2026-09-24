@@ -21,8 +21,12 @@ import { t, num, getLang, setLang, applyTranslations } from './i18n.js';
 import { detectTheme, getTheme, setTheme, toggleTheme, cssColorToGl } from './ui/theme.js';
 import { screenRay, raycastVoxel, rayPlanePoint } from './edit/pick.js';
 import { History } from './edit/history.js';
-import { applyTool, boxExtent, applyBox, collectFillRegion, mirrorX } from './edit/tools.js';
-import { boxEdges, faceEdges, regionOutline, brushExtent, addSeed, joinLines } from './edit/preview.js';
+import { applyTool, collectFillRegion, mirrorX } from './edit/tools.js';
+import { boxEdges, faceEdges, faceDiagonals, cellGrid, regionOutline, brushExtent, addSeed, joinLines, GRID_RADIUS } from './edit/preview.js';
+import {
+  dragExtent, clampExtent, resizeExtent, extentSize, extentCells, countBlock,
+  boxFaceUnderRay, axisPointFromRay, applySelection, COUNT_LIMIT,
+} from './edit/selection.js';
 import { paletteBands, paletteOrder } from './edit/palette-order.js';
 import { mergeOffer } from './edit/merge-offer.js';
 import { strokeSamples, strokeStepPx } from './edit/stroke.js';
@@ -70,8 +74,17 @@ const state = {
   /** the instance buffer is stale; coalesced to one rebuild per frame */
   geometryDirty: false,
 
-  /** @type {'orbit'|'paint'|'fill'|'erase'|'add'|'pick'|'box'|'boxErase'} */
+  /** @type {'orbit'|'paint'|'fill'|'erase'|'add'|'pick'|'box'} */
   tool: 'orbit',
+  /**
+   * The block the box tool left behind, in voxel coordinates, or null.
+   *
+   * It outlives the drag on purpose: the whole point of the rewrite is that
+   * marking a block and doing something to it are two steps, with a look in
+   * between.
+   * @type {{min: [number, number, number], max: [number, number, number]} | null}
+   */
+  selection: null,
   /** palette index the editing tools apply */
   color: 1,
   /** cube radius; 0 is a single voxel */
@@ -372,6 +385,7 @@ function dropBuild() {
   state.building = false;
   showBuildProgress(null);
   refreshMergeOffer();
+  refreshSelectionPanel();
 }
 
 /**
@@ -415,6 +429,9 @@ async function build() {
   const job = { views: views.map((v) => v.snapshot()), N, mirrorMissing };
 
   state.building = true;
+  // The buttons under the block go dark while the volume is being replaced,
+  // and say why; the block itself goes when the new volume lands.
+  refreshSelectionPanel();
   showBuildProgress(0, 'sample');
   // The merge button acts on the model the build is about to replace, so it goes
   // dark for the duration and says why.
@@ -430,11 +447,15 @@ async function build() {
     state.building = false;
     showBuildProgress(null);
     refreshMergeOffer();
+    refreshSelectionPanel();
     status('status.buildFailed', { err: String(err instanceof Error ? err.message : err) }, 'error');
     return;
   }
   state.building = false;
   showBuildProgress(null);
+  // The volume is replaced whole, so the block's coordinates name cells that
+  // no longer exist.
+  clearSelection();
 
   const { volume, stats } = built;
   state.palette = built.palette;
@@ -609,11 +630,20 @@ function wirePitchPresets() {
 
 function updateZoomLabel() {
   $('zoom-label').textContent = camera.pixelsPerVoxel + '×';
+  // Saying "there is no grid yet, and here is the zoom that brings it" beats
+  // leaving an empty viewport to be worked out.
+  $('bounds-hint').textContent = t('view.boundsHint', {
+    min: GRID_MIN_ZOOM,
+    now: camera.pixelsPerVoxel,
+  });
 }
 
 /** @param {number} delta */
 function zoomBy(delta) {
   camera.pixelsPerVoxel = Math.max(1, Math.min(64, camera.pixelsPerVoxel + delta));
+  // The patch belongs to a cell under a cursor that has not moved since; at a
+  // new zoom it may not be drawn at all.
+  renderer.clearGrid();
   updateZoomLabel();
   state.dirty = true;
 }
@@ -736,11 +766,14 @@ const TOOL_BUTTONS = [
   { id: 'add', key: 'tool.add', glyph: '⬜', hotkey: 'a' },
   { id: 'pick', key: 'tool.pick', glyph: '◔', hotkey: 'i' },
   { id: 'box', key: 'tool.box', glyph: '⬛', hotkey: 'r' },
-  { id: 'boxErase', key: 'tool.boxErase', glyph: '⬚', hotkey: 't' },
 ];
 
-/** Tools that work one face at a time, so a brush size would mean nothing. */
-const ONE_FACE_TOOLS = new Set(['orbit', 'fill', 'pick']);
+/**
+ * Tools the brush slider does not reach: Fill and Pick work one face at a
+ * time, and the Box now takes all three of its sizes from the drag itself. A
+ * live slider that changes nothing is a promise the tool does not keep.
+ */
+const BRUSHLESS_TOOLS = new Set(['orbit', 'fill', 'pick', 'box']);
 
 /** Axis names for the hover line. Not translated: they are axes, not words. */
 const FACE_NAMES = ['+X', '\u2212X', '+Y', '\u2212Y', '+Z', '\u2212Z'];
@@ -771,7 +804,10 @@ function buildToolBar() {
 
 /** @param {typeof state.tool} tool */
 function setTool(tool) {
+  const wasBox = isBoxTool();
   state.tool = tool;
+  // A block belongs to the box tool; leaving the tool leaves the block.
+  if (wasBox && tool !== 'box') clearSelection();
   markActiveTool();
   refreshToolControls();
   // The old tool's promise is no longer true; the new one makes its own on the
@@ -801,7 +837,7 @@ function refreshToolControls() {
   $('tool-hint').textContent = t(isBoxTool() ? 'edit.boxHint' : 'tool.' + state.tool + '.hint');
 
   const brush = /** @type {HTMLInputElement} */ ($('brush-size'));
-  const brushOff = ONE_FACE_TOOLS.has(state.tool);
+  const brushOff = BRUSHLESS_TOOLS.has(state.tool);
   brush.disabled = brushOff;
   $('brush-label').textContent = brushOff ? '\u2014' : (state.brush * 2 + 1) + '\u00b3';
   $('brush-note').classList.toggle('hidden', !brushOff);
@@ -1149,15 +1185,6 @@ function refreshHistoryButtons() {
 let everEdited = false;
 
 /**
- * Where a pointer event lands in the model.
- * @param {PointerEvent} e
- */
-function hitAt(e) {
-  const [sx, sy] = canvasPoint(e);
-  return hitAtPoint(sx, sy);
-}
-
-/**
  * Pointer position in drawing-buffer pixels, which is the space rays are cast
  * in and the space a stroke is resampled in.
  * @param {{clientX: number, clientY: number}} e
@@ -1243,10 +1270,11 @@ function runToolAtPoint(sx, sy) {
 /**
  * The brush radius the armed tool actually uses. Fill and Pick work one face
  * at a time whatever the slider says, and the preview must promise what will
- * happen, not what the slider reads.
+ * happen, not what the slider reads. The Box never asks: it draws the block it
+ * has.
  */
 function brushRadius() {
-  return ONE_FACE_TOOLS.has(state.tool) ? 0 : state.brush;
+  return BRUSHLESS_TOOLS.has(state.tool) ? 0 : state.brush;
 }
 
 /** Faces or voxels the current stroke has changed so far. */
@@ -1326,11 +1354,17 @@ function afterHistoryStep(kind) {
   }
   state.dirty = true;
   refreshHistoryButtons();
+  // Undoing an action leaves the block where it was, so its counts - and with
+  // them which of the three buttons are lit - have to be worked out again.
+  refreshSelectionPanel();
 }
 
 /**
- * Live state of a box drag: where it began and the cuboid it currently covers.
- * @type {{anchor: {x: number, y: number, z: number, face: number}, extent: {min: [number,number,number], max: [number,number,number]}} | null}
+ * Live state of a box drag.
+ *
+ * `new` is a rectangle being pulled out on the face it started on; `face` is
+ * one side of the finished block being moved along its own axis.
+ * @type {{kind: 'new'|'face', anchor?: {x: number, y: number, z: number, face: number}, face: number, start: {min: [number,number,number], max: [number,number,number]} | null, offset: number} | null}
  */
 let boxDrag = null;
 
@@ -1353,7 +1387,7 @@ let strokeLastHit = null;
  */
 let strokeLastPoint = null;
 
-const isBoxTool = () => state.tool === 'box' || state.tool === 'boxErase';
+const isBoxTool = () => state.tool === 'box';
 
 /**
  * The far corner of the drag, found by meeting the plane of the face it began
@@ -1388,50 +1422,237 @@ function boxCornerAt(e, anchor) {
   return /** @type {[number, number, number]} */ (out);
 }
 
-/** @param {PointerEvent} e */
-function updateBoxDrag(e) {
-  if (!boxDrag || !state.volume) return;
-  const corner = boxCornerAt(e, boxDrag.anchor);
-  const extent = boxExtent(boxDrag.anchor, corner, brushRadius() + 1, state.tool === 'box');
-  const vol = state.volume;
-  const dims = [vol.nx, vol.ny, vol.nz];
-  for (let i = 0; i < 3; i++) {
-    extent.min[i] = Math.max(0, Math.min(dims[i] - 1, extent.min[i]));
-    extent.max[i] = Math.max(0, Math.min(dims[i] - 1, extent.max[i]));
+/**
+ * Lowest zoom at which the cell grid is drawn, in device pixels per voxel.
+ *
+ * Not the owner's number, and not `designer`'s either: the specification
+ * proposed 8 and told the implementer to measure it.
+ *
+ * Measured on the default camera (yaw 45 degrees, pitch atan 0.5 - the 2:1
+ * dimetric the app opens in), by projecting the unit voxel edges through
+ * `OrthoCamera.viewMatrix` and taking the distance between neighbouring grid
+ * lines. The tightest face is the top one: its two line families sit 0.5774
+ * voxel apart on screen, against 0.7071 and 0.8165 on the front and side
+ * faces. In device pixels that spacing is 2.3 at 4x, 4.6 at 8x, 6.9 at 12x,
+ * 9.2 at 16x.
+ *
+ * So the figure the specification gave as grounds for 8 - "a cell is about
+ * the height of a panel label" - is wrong: a 1 px line every 4.6 px leaves a
+ * 3.6 px gap on the top face, which is a grey wash at the exact angle the app
+ * starts in, and no zoom below 18x reaches the 10 px of the smallest readable
+ * type (`docs/DESIGN.md` section 3). Type height turns out to be the wrong
+ * yardstick anyway - what matters is a gap wide enough to aim into.
+ *
+ * 11 is where the spacing first clears 6 px, that is a 1 px line with a 5 px
+ * hole beside it; 12 is where an independent run reported being able to count
+ * the cells, and it is one step further, so 12 it is. Both are reachable -
+ * zoom steps by 1, not by doubling. `tests/edit/grid-threshold` keeps the
+ * number tied to that measurement in both directions. The figure is the
+ * implementer's, not the owner's and not `designer`'s.
+ *
+ * The camera opens at 4, so the grid is off until the user zooms in - which is
+ * why the checkbox says so in words rather than leaving an empty viewport to
+ * be puzzled over.
+ */
+const GRID_MIN_ZOOM = 12;
+
+/** The face of the block the cursor has armed, or null. */
+let armedFace = null;
+
+/** The last counts worked out for the block, for the buttons' promises. */
+let selectionCounts = { solid: 0, empty: 0, cells: 0, counted: false };
+
+/**
+ * The centre of one face of the block, in corner coordinates - the point the
+ * dragged face's axis line runs through.
+ * @param {{min: [number, number, number], max: [number, number, number]}} sel
+ * @param {number} face
+ * @returns {[number, number, number]}
+ */
+function boxFaceCentre(sel, face) {
+  const axis = face >> 1;
+  const c = /** @type {[number, number, number]} */ ([
+    (sel.min[0] + sel.max[0] + 1) / 2,
+    (sel.min[1] + sel.max[1] + 1) / 2,
+    (sel.min[2] + sel.max[2] + 1) / 2,
+  ]);
+  c[axis] = face % 2 === 0 ? sel.max[axis] + 1 : sel.min[axis];
+  return c;
+}
+
+/**
+ * The outline of the block, plus the diagonals of an armed face.
+ *
+ * Called wherever the hover outline used to be cleared: the block is not a
+ * promise the cursor makes, it is a thing that exists, and it has to survive
+ * the pointer wandering off the model.
+ */
+function drawSelection() {
+  const sel = state.selection;
+  if (!sel || !isBoxTool()) {
+    renderer.clearPreview();
+    state.dirty = true;
+    return;
   }
-  boxDrag.extent = extent;
-  renderer.setPreviewLines(boxEdges(extent.min, extent.max));
+  const parts = [boxEdges(sel.min, sel.max)];
+  if (armedFace !== null) parts.push(faceDiagonals(sel.min, sel.max, armedFace));
+  renderer.setPreviewLines(joinLines(parts));
   state.dirty = true;
 }
 
-function commitBoxDrag() {
-  const drag = boxDrag;
-  boxDrag = null;
-  renderer.clearPreview();
-  state.dirty = true;
-  if (!drag || !state.volume || state.building) return;
+/**
+ * @param {{min: [number, number, number], max: [number, number, number]}} ext
+ */
+function setSelection(ext) {
+  state.selection = ext;
+  drawSelection();
+  refreshSelectionPanel();
+}
+
+function clearSelection() {
+  if (!state.selection) return;
+  state.selection = null;
+  armedFace = null;
+  canvas.classList.remove('box-handle');
+  drawSelection();
+  refreshSelectionPanel();
+}
+
+/**
+ * The block's size, its counts, and which of the three actions can be run.
+ *
+ * Past `COUNT_LIMIT` the counts are unknown rather than zero, and the buttons
+ * stay lit: the action is legal, only the number is missing, and darkening a
+ * working button because counting was inconvenient would be a lie.
+ */
+function refreshSelectionPanel() {
+  const sel = state.selection;
+  $('selection-block').classList.toggle('hidden', !sel);
+  if (!sel) return;
+
+  const [w, h, d] = extentSize(sel);
+  $('selection-size').textContent = w + '×' + h + '×' + d;
+
+  selectionCounts = state.volume
+    ? countBlock(state.volume, sel)
+    : { solid: 0, empty: 0, cells: extentCells(sel), counted: false };
+  $('selection-figures').textContent = selectionCounts.counted
+    ? t('edit.boxFigures', { solid: selectionCounts.solid, empty: selectionCounts.empty })
+    : '— · —';
+
+  const counted = selectionCounts.counted;
+  const busy = state.building;
+  /** @type {HTMLButtonElement} */ ($('btn-box-fill')).disabled = busy || (counted && selectionCounts.empty === 0);
+  /** @type {HTMLButtonElement} */ ($('btn-box-delete')).disabled = busy || (counted && selectionCounts.solid === 0);
+  /** @type {HTMLButtonElement} */ ($('btn-box-paint')).disabled = busy || (counted && selectionCounts.solid === 0);
+  /** @type {HTMLButtonElement} */ ($('btn-box-clear')).disabled = busy;
+
+  // One reason at a time under the group, as the panel's own rule demands.
+  let note = '';
+  if (busy) note = 'edit.boxBuildingNote';
+  else if (!counted) note = 'edit.boxTooBig';
+  else if (selectionCounts.solid === 0) note = 'edit.boxEmptyNote';
+  else if (selectionCounts.empty === 0) note = 'edit.boxFullNote';
+  const el = $('selection-note');
+  el.classList.toggle('hidden', !note);
+  if (note) el.textContent = t(note);
+}
+
+/**
+ * Do one of the three things to the block, and leave the block where it is:
+ * "delete" is nearly always followed by "delete one cell deeper".
+ * @param {'fill'|'delete'|'paint'} action
+ */
+function runSelectionAction(action) {
+  const sel = state.selection;
+  if (!sel || !state.volume || state.building) return;
 
   state.history.begin();
-  const changed = applyBox(state.volume, drag.extent, {
-    fill: state.tool === 'box',
+  const res = applySelection(state.volume, sel, action, {
     color: state.color,
     symmetryX: /** @type {HTMLInputElement} */ ($('symmetry-x')).checked,
     history: state.history,
   });
-  if (changed > 0) {
+  const [w, h, d] = extentSize(sel);
+  const moved = action === 'paint' ? res.faces : res.voxels;
+
+  if (moved > 0) {
     state.geometryDirty = true;
+    state.dirty = true;
     if (state.history.commit(state.volume)) refreshHistoryButtons();
     scheduleUsage();
     hoverLine = null;
-    status('status.boxApplied', {
-      n: changed,
-      w: drag.extent.max[0] - drag.extent.min[0] + 1,
-      h: drag.extent.max[1] - drag.extent.min[1] + 1,
-      d: drag.extent.max[2] - drag.extent.min[2] + 1,
-    });
+    if (action === 'fill') status('status.boxFilled', { n: res.voxels, w, h, d });
+    else if (action === 'delete') status('status.boxDeleted', { n: res.voxels, w, h, d });
+    else status('status.boxPainted', { n: res.faces, i: state.color });
   } else {
     state.history.commit(state.volume);
+    hoverLine = null;
+    status('status.boxNothing', undefined, 'warn');
   }
+  refreshSelectionPanel();
+  drawSelection();
+}
+
+/**
+ * The cell grid under the cursor, or nothing when any of its conditions fail.
+ * @param {{x: number, y: number, z: number, face: number} | null} hit
+ */
+function updateCellGrid(hit) {
+  const vol = state.volume;
+  const on = vol && hit && state.tool !== 'orbit'
+    && /** @type {HTMLInputElement} */ ($('bounds-toggle')).checked
+    && camera.pixelsPerVoxel >= GRID_MIN_ZOOM;
+  if (!on || !vol || !hit) {
+    if (renderer.gridVertexCount > 0) {
+      renderer.clearGrid();
+      state.dirty = true;
+    }
+    return;
+  }
+  renderer.setGridLines(cellGrid(hit, [vol.nx, vol.ny, vol.nz], GRID_RADIUS));
+  state.dirty = true;
+}
+
+/** @param {PointerEvent} e */
+function updateBoxDrag(e) {
+  if (!boxDrag || !state.volume) return;
+  const vol = state.volume;
+  const dims = /** @type {[number, number, number]} */ ([vol.nx, vol.ny, vol.nz]);
+
+  if (boxDrag.kind === 'new' && boxDrag.anchor) {
+    const corner = boxCornerAt(e, boxDrag.anchor);
+    setSelection(dragExtent(boxDrag.anchor, corner, dims));
+    updateCellGrid(boxDrag.anchor);
+  } else if (boxDrag.start) {
+    const [sx, sy] = canvasPoint(e);
+    const ray = screenRay(camera, sx, sy, canvas.width, canvas.height);
+    const axis = boxDrag.face >> 1;
+    const coord = axisPointFromRay(ray.origin, ray.dir, boxFaceCentre(boxDrag.start, boxDrag.face), axis);
+    if (coord === null) return;
+    const moved = resizeExtent(boxDrag.start, boxDrag.face, coord + boxDrag.offset, dims);
+    setSelection(clampExtent(moved, dims));
+    const sel = state.selection;
+    if (sel) {
+      const c = boxFaceCentre(sel, boxDrag.face);
+      updateCellGrid({
+        x: Math.min(sel.max[0], Math.max(sel.min[0], Math.floor(c[0]))),
+        y: Math.min(sel.max[1], Math.max(sel.min[1], Math.floor(c[1]))),
+        z: Math.min(sel.max[2], Math.max(sel.min[2], Math.floor(c[2]))),
+        face: boxDrag.face,
+      });
+    }
+  }
+  reportBlockSize();
+}
+
+/** The size of the block, in the status bar, while it is being made. */
+function reportBlockSize() {
+  const sel = state.selection;
+  if (!sel) return;
+  const [w, h, d] = extentSize(sel);
+  hoverLine = null;
+  status('status.boxSize', { w, h, d, n: extentCells(sel) });
 }
 
 /**
@@ -1507,7 +1728,10 @@ function clearHover() {
   hoverKey = null;
   hoverBase = '';
   clearTimeout(hoverTimer);
-  renderer.clearPreview();
+  // The block is not a promise the cursor is making, so it stays; only the
+  // tool's own outline and the grid go.
+  drawSelection();
+  updateCellGrid(null);
   state.dirty = true;
   if (hoverLine) {
     hoverLine = null;
@@ -1534,11 +1758,26 @@ function updateHover(e) {
     return;
   }
   const [sx, sy] = canvasPoint(e);
-  const hit = hitAtPoint(sx, sy);
+  const ray = screenRay(camera, sx, sy, canvas.width, canvas.height);
+  const hit = raycastVoxel(vol, ray.origin, ray.dir);
+
+  if (isBoxTool()) {
+    // A face of the block under the cursor is armed: it will move, not start a
+    // new block, and it says so with two diagonals and a `move` cursor.
+    const sel = state.selection;
+    const face = sel ? boxFaceUnderRay(sel, ray.origin, ray.dir) : null;
+    canvas.classList.toggle('box-handle', face !== null);
+    if (face !== armedFace) {
+      armedFace = face;
+      drawSelection();
+    }
+  }
+
   if (!hit) {
     clearHover();
     return;
   }
+  updateCellGrid(hit);
 
   const key = ((hit.x * vol.ny + hit.y) * vol.nz + hit.z) * 6 + hit.face;
   // Everything below costs a raycast or worse, and a hand crossing a face
@@ -1568,6 +1807,14 @@ function drawHover(hit) {
   };
   hoverBase = t('status.hover', baseParams);
 
+  // The box tool draws its block, not a brush cube: what is on screen is the
+  // block that exists, and nothing is promised until a button is pressed.
+  if (isBoxTool()) {
+    drawSelection();
+    setHoverLine('status.hover', baseParams);
+    return;
+  }
+
   const mirror = /** @type {HTMLInputElement} */ ($('symmetry-x')).checked;
   // Mirrored edits are invisible until they happen unless the promise is made
   // twice, once on each side.
@@ -1586,7 +1833,7 @@ function drawHover(hit) {
   renderer.setPreviewLines(joinLines(parts));
   state.dirty = true;
 
-  if (state.tool === 'pick' || isBoxTool()) {
+  if (state.tool === 'pick') {
     setHoverLine('status.hover', baseParams);
   } else {
     const side = brushRadius() * 2 + 1;
@@ -1603,10 +1850,6 @@ function drawHover(hit) {
  * @returns {Float32Array}
  */
 function toolOutline(hit, dims) {
-  // The box tools draw their rectangle while dragging and nothing before it:
-  // there is no rectangle until a corner has been put down.
-  if (isBoxTool()) return new Float32Array(0);
-
   const r = brushRadius();
   if (state.tool === 'pick') return boxEdges([hit.x, hit.y, hit.z], [hit.x, hit.y, hit.z]);
 
@@ -1667,12 +1910,31 @@ function setupPointer() {
     else mode = 'tool';
 
     if (mode === 'tool' && isBoxTool()) {
-      const hit = hitAt(e);
-      if (hit) {
-        boxDrag = { anchor: hit, extent: { min: [0, 0, 0], max: [0, 0, 0] } };
-        updateBoxDrag(e);
+      const [sx, sy] = canvasPoint(e);
+      const ray = screenRay(camera, sx, sy, canvas.width, canvas.height);
+      const sel = state.selection;
+      const face = sel ? boxFaceUnderRay(sel, ray.origin, ray.dir) : null;
+      if (sel && face !== null) {
+        // Pulling a face of the block, including along the normal of the face
+        // the block was drawn on - that is where the third dimension comes
+        // from now. The grab offset keeps the face from jumping to the cursor.
+        const axis = face >> 1;
+        const coord = axisPointFromRay(ray.origin, ray.dir, boxFaceCentre(sel, face), axis);
+        const plane = face % 2 === 0 ? sel.max[axis] + 1 : sel.min[axis];
+        armedFace = face;
+        boxDrag = { kind: 'face', face, start: sel, offset: coord === null ? 0 : plane - coord };
+        drawSelection();
       } else {
-        mode = null;
+        const hit = state.volume ? raycastVoxel(state.volume, ray.origin, ray.dir) : null;
+        if (hit) {
+          // A press on the model outside the block starts a new one; the old
+          // block goes without a question, because no geometry was touched.
+          armedFace = null;
+          boxDrag = { kind: 'new', anchor: hit, face: hit.face, start: null, offset: 0 };
+          updateBoxDrag(e);
+        } else {
+          mode = null;
+        }
       }
     } else if (mode === 'tool') {
       state.history.begin();
@@ -1717,7 +1979,12 @@ function setupPointer() {
 
   const end = (/** @type {PointerEvent} */ e) => {
     if (mode === 'tool' && boxDrag) {
-      commitBoxDrag();
+      // The drag only shapes the block. Applying it is a separate command -
+      // that is the whole change: mark, look, then act.
+      boxDrag = null;
+      refreshSelectionPanel();
+      drawSelection();
+      reportBlockSize();
     } else if (mode === 'tool' && state.volume) {
       // One undo step per stroke, not per voxel.
       if (state.history.commit(state.volume)) refreshHistoryButtons();
@@ -2128,6 +2395,8 @@ function retranslate() {
   // Carries numbers, so it is written by hand rather than by data-i18n and has
   // to be asked to rewrite itself.
   refreshVoxAvailability();
+  refreshSelectionPanel();
+  updateZoomLabel();
   renderStatus();
   updateStats(state.lastStats, renderer.instanceCount);
   updateFramePreview();
@@ -2158,6 +2427,36 @@ function init() {
 
   $('btn-undo').addEventListener('click', undo);
   $('btn-redo').addEventListener('click', redo);
+
+  // The three things a block can be used for, plus dropping it. Each says in
+  // the status bar what it is about to do while the pointer is over it, and
+  // puts the previous message back when the pointer leaves.
+  /** @type {Array<['fill'|'delete'|'paint', string, string]>} */
+  const blockActions = [
+    ['fill', 'btn-box-fill', 'edit.boxFillTitle'],
+    ['delete', 'btn-box-delete', 'edit.boxDeleteTitle'],
+    ['paint', 'btn-box-paint', 'edit.boxPaintTitle'],
+  ];
+  for (const [action, id, key] of blockActions) {
+    const b = $(id);
+    b.addEventListener('click', () => runSelectionAction(action));
+    b.addEventListener('pointerenter', () => {
+      const sel = state.selection;
+      if (!sel || !selectionCounts.counted) return;
+      const [w, h, d] = extentSize(sel);
+      const n = action === 'fill' ? selectionCounts.empty : selectionCounts.solid;
+      setHoverLine(key, { w, h, d, n });
+    });
+    b.addEventListener('pointerleave', () => {
+      if (!hoverLine) return;
+      hoverLine = null;
+      renderStatus();
+    });
+  }
+  $('btn-box-clear').addEventListener('click', () => {
+    clearSelection();
+    renderStatus();
+  });
 
   const box = $('palette-box');
   box.addEventListener('click', (e) => {
@@ -2371,13 +2670,35 @@ function init() {
   });
 
   window.addEventListener('keydown', (e) => {
-    if (/** @type {HTMLElement} */ (e.target).matches('input, select, textarea')) return;
+    // `e.target` is the window itself for a synthetic event, and `matches` is
+    // not a method of a window; without the guard the block's keys could not
+    // be measured at all, only tried by hand.
+    const target = /** @type {HTMLElement|null} */ (e.target);
+    if (target && typeof target.matches === 'function' && target.matches('input, select, textarea')) return;
 
     if (e.ctrlKey || e.metaKey) {
       const k = e.key.toLowerCase();
       if (k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
       else if ((k === 'z' && e.shiftKey) || k === 'y') { e.preventDefault(); redo(); }
       return;
+    }
+
+    // The block's own keys come before everything else: Delete must not reach
+    // the browser, and Esc has to work whatever tool is armed.
+    if (e.key === 'Escape') {
+      if (state.selection) {
+        clearSelection();
+        renderStatus();
+      }
+      return;
+    }
+    if (state.selection && isBoxTool() && !state.building) {
+      if (e.key === 'Enter') { e.preventDefault(); runSelectionAction('fill'); return; }
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        runSelectionAction('delete');
+        return;
+      }
     }
 
     const idx = '12345'.indexOf(e.key);
@@ -2420,6 +2741,9 @@ function init() {
   });
 
   refreshToolControls();
+  // The grid's threshold is written under its checkbox from the first frame,
+  // not only once a model has been built.
+  updateZoomLabel();
   updateFramePreview();
   loadDemo();
   requestAnimationFrame(frame);
