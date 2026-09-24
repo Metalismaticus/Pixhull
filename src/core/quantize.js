@@ -25,12 +25,16 @@
  * No dithering, on purpose - pixel art is not dithered (`docs/ROADMAP.md`).
  */
 
-import { packedToLab } from './color.js';
+import { packedToLab, ciede2000 } from './color.js';
+import { MERGE_DELTA_E } from './palette.js';
 
 /**
  * @typedef {Object} QuantizeResult
  * @property {number[]} colors chosen colours, packed 0xRRGGBB, most covered first
  * @property {Map<number, number>} assign source colour -> index into `colors`
+ * @property {number} reserved how many of `colors` came from the reservation
+ *   rule below rather than from the cut. Reported for the checks: on flat art
+ *   this number must not move when the fold changes.
  */
 
 /**
@@ -48,6 +52,32 @@ const RESERVE_SHARE = 0.002;
 const RESERVE_CAP = 0.25;
 
 /**
+ * Two reservations this close are the same colour as far as anyone can see, so
+ * only one of them is worth a slot.
+ *
+ * The rule above asks one question - "does this colour cover enough of the art"
+ * - and on flat pixel art that is the whole story, because the shades an artist
+ * puts down are far apart. On a rendered, anti-aliased sheet it is not: the
+ * owner's lorry (2026-09-24, grid 256, 17352 art colours) passes 48 colours
+ * over the bar, and 41 of them are near-neutrals within dE 1 of one of the
+ * other seven - `d9d9d9 d8d8d8 d9d8d9 d9d8d8 dad9da ...`, one slot each, none
+ * of them distinguishable from the next. Those 41 slots are simply gone: they
+ * cannot show the artist anything, and the accents that needed them went to the
+ * cut instead.
+ *
+ * So before the reservation spends a slot, indistinguishable reservations
+ * collapse onto the one covering the most art, and the slots that frees go back
+ * to the cut. Same threshold and same keeper-first grouping as the palette's
+ * own merge (`Palette.planMerge`), for one reason: a user who presses "merge
+ * near-duplicates" straight after an import should be told there is nothing to
+ * do, not handed the work the import already knew about.
+ *
+ * On flat colour this is a no-op - `tests/palette/reserve-fold.mjs` measures
+ * exactly that.
+ */
+const RESERVE_FOLD_DELTA_E = MERGE_DELTA_E;
+
+/**
  * @param {Map<number, number>} counts packed colour -> cells covered
  * @param {number} max how many colours may survive
  * @returns {QuantizeResult}
@@ -57,25 +87,86 @@ export function quantize(counts, max) {
   for (const w of counts.values()) weightSum += w;
   const bar = weightSum * RESERVE_SHARE;
   const cap = Math.floor(max * RESERVE_CAP);
-  /** @type {Array<[number, number]>} */
-  const heavy = [...counts].filter(([, w]) => w >= bar).sort((a, b) => b[1] - a[1]).slice(0, cap);
+  const candidates = [...counts].filter(([, w]) => w >= bar).sort((a, b) => b[1] - a[1]);
+  const { heavy, followers, alias } = foldReservations(candidates, cap);
   /** @type {Set<number>} */
-  const reserved = new Set(heavy.map(([k]) => k));
+  const reserved = new Set(alias.keys());
   // Everything the reservation did not claim is what the cut has to describe.
   const rest = reserved.size === 0 ? counts : new Map([...counts].filter(([k]) => !reserved.has(k)));
-  const slots = max - reserved.size;
+  let slots = max - heavy.length;
   if (rest.size <= slots) {
-    const colors = [...heavy.map(([k]) => k), ...[...rest].sort((a, b) => b[1] - a[1]).map(([k]) => k)];
+    // No pressure on the palette after all: every remaining colour can have a
+    // slot of its own and there are still slots going spare. Then the fold has
+    // nothing to buy, and exactness is worth more than a tidy palette, so the
+    // followers take their own slots back - heaviest first, while the spare
+    // slots last. With enough room this undoes the fold completely.
+    for (const k of followers) {
+      if (rest.size > slots - 1) break;
+      alias.set(k, heavy.length);
+      heavy.push(k);
+      slots--;
+    }
+    const colors = [...heavy, ...[...rest].sort((a, b) => b[1] - a[1]).map(([k]) => k)];
     const assign = new Map();
     colors.forEach((k, i) => assign.set(k, i));
-    return { colors, assign };
+    for (const [k, slot] of alias) assign.set(k, slot);
+    return { colors, assign, reserved: heavy.length };
   }
   const cut = medianCut(rest, slots);
-  const colors = [...heavy.map(([k]) => k), ...cut.colors];
-  const assign = new Map();
-  heavy.forEach(([k], i) => assign.set(k, i));
-  for (const [k, slot] of cut.assign) assign.set(k, reserved.size + slot);
-  return { colors, assign };
+  const colors = [...heavy, ...cut.colors];
+  const assign = new Map(alias);
+  for (const [k, slot] of cut.assign) assign.set(k, heavy.length + slot);
+  return { colors, assign, reserved: heavy.length };
+}
+
+/**
+ * Collapse reservations nobody can tell apart, keeper-first.
+ *
+ * Candidates arrive heaviest first, so the colour covering the most art is
+ * always the keeper and the rest of its group follow it; ties keep the order
+ * the caller's sort produced, which is the same on every run. A group past the
+ * cap is not reserved at all - neither keeper nor followers - and goes back to
+ * the cut whole, rather than half of it being held back from a box it belongs
+ * in.
+ *
+ * @param {Array<[number, number]>} candidates packed colour, weight; heaviest first
+ * @param {number} cap how many slots the reservation may spend at most
+ * @returns {{heavy: number[], followers: number[], alias: Map<number, number>}}
+ *   keepers in slot order, the colours folded onto them (heaviest first), and
+ *   every reserved source colour mapped to the slot it lands in
+ */
+function foldReservations(candidates, cap) {
+  /** @type {number[]} keepers, in the order they were found */
+  const heavy = [];
+  /** @type {number[]} folded colours, heaviest first, for the caller to undo */
+  const followers = [];
+  /** @type {number[][]} Lab of each keeper */
+  const labs = [];
+  /** @type {number[][]} every source colour each keeper speaks for */
+  const groups = [];
+  for (const [k] of candidates) {
+    const [l, a, b] = packedToLab(k);
+    let found = -1;
+    for (let i = 0; i < heavy.length; i++) {
+      if (ciede2000(l, a, b, labs[i][0], labs[i][1], labs[i][2]) <= RESERVE_FOLD_DELTA_E) {
+        found = i;
+        break;
+      }
+    }
+    if (found >= 0) {
+      groups[found].push(k);
+      followers.push(k);
+      continue;
+    }
+    if (heavy.length >= cap) continue; // no slot left to open a new group with
+    heavy.push(k);
+    labs.push([l, a, b]);
+    groups.push([k]);
+  }
+  /** @type {Map<number, number>} */
+  const alias = new Map();
+  for (let i = 0; i < heavy.length; i++) for (const k of groups[i]) alias.set(k, i);
+  return { heavy, followers, alias };
 }
 
 /**

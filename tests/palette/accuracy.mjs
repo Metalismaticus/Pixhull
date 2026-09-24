@@ -26,10 +26,17 @@
  * colour, the worst of them off by dE 23.5, and 96.2% are within dE 2. With
  * the fix: nothing above dE 10 at all, worst cell dE 1.0, 100% within dE 2.
  *
- * Exact matches go the other way, 86.8% -> 82.4%, and that is the trade being
+ * Exact matches go the other way, 86.8% -> 81.8%, and that is the trade being
  * made on purpose: the quantiser merges near-whites that differ by dE 0.6 in
  * order to keep the accents that were being dropped entirely. Which is why the
  * check is written on perceptual distance and not on byte equality.
+ *
+ * (82.4% until 2026-09-24, when the reservation stopped spending a slot each on
+ * near-whites nobody can tell apart. This fixture has 204 of them, so the
+ * reservation now covers 215 colours instead of 63, and the 69 that miss out
+ * are picked by coverage rather than by the cut's error. Every perceptual
+ * number here is unchanged: 100% within dE 2, worst dE 1.0, nothing visibly
+ * wrong.)
  *
  * The thresholds below are mine, set under the measured result with room to
  * breathe: no cell may be visibly wrong, and 99% must be indistinguishable.
