@@ -20,6 +20,16 @@
   --status-fade: #0e1016dd;
   --bounds-color: #ffffff;
   --bounds-alpha: 0.12;
+  /* The disagreement map's own scale (section 10.2 of the screen spec). A
+     ladder by lightness, so the bands read without colour vision too: louder
+     is lighter here, darker in the light theme. Kept clear of --accent and
+     --danger - a disagreement is the artist's, not a fault of the tool. */
+  --map-none: #2a2f3c;
+  --map-agree: #3f4757;
+  --map-low: #5b4a8e;
+  --map-mid: #9a4d9e;
+  --map-high: #d75f7a;
+  --map-max: #f5c451;
   --radius: 6px;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
   color-scheme: dark;
@@ -45,6 +55,12 @@
   --status-fade: #f4f5f8dd;
   --bounds-color: #1d2230;
   --bounds-alpha: 0.35;
+  --map-none: #d5d9e2;
+  --map-agree: #b3bac7;
+  --map-low: #8d7ec4;
+  --map-mid: #a44fae;
+  --map-high: #c94a63;
+  --map-max: #b07400;
   color-scheme: light;
 }
 
@@ -498,6 +514,10 @@ button.linkish {
   text-overflow: ellipsis;
 }
 .toolbar button:focus-visible { outline: 1px solid var(--accent-dim); outline-offset: 0; }
+/* A viewing mode has no tools but the one that looks: the other six go quiet
+   and the reason stands under the row (`docs/DESIGN.md`, section 6). */
+.toolbar button:disabled { opacity: .45; cursor: not-allowed; }
+.toolbar button:disabled:hover { color: var(--text-dim); border-color: var(--line); }
 
 /*
  * The palette is a box with an edge, not a strip that runs off the bottom of
@@ -638,6 +658,67 @@ input[type="color"] {
 
 /* A size that changes digit by digit has to hold still while it does. */
 .unit.mono { font-family: var(--mono); }
+
+/*
+ * The disagreement scale: six rows of "swatch, range, name, count". Not a box
+ * and not a widget - no background, no border, no padding - because it is a
+ * list explaining the colours in the viewport, not a control.
+ *
+ * `.stats` was the near miss: same monospaced column of figures, but it is
+ * pinned to the bottom of the panel with `margin-top: auto` and draws a rule
+ * above itself, so in the middle of a section it would drag itself down and
+ * bring a stray divider with it.
+ */
+.map-block { display: block; }
+.map-block.hidden { display: none; }
+.map-block .readout { margin-top: 6px; }
+.map-block .hint { margin-top: 6px; }
+
+.scale {
+  display: grid;
+  gap: 2px;
+  margin-top: 6px;
+}
+.scale-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 16px;
+}
+/* A band nobody landed in is still shown - a missing row would read as a
+   broken scale - but it says so by going quiet. */
+.scale-row.empty { opacity: .45; }
+.scale-chip {
+  width: 10px;
+  height: 10px;
+  border-radius: 4px;
+  flex: 0 0 auto;
+}
+.scale-range {
+  width: 44px;
+  flex: 0 0 auto;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+}
+.scale-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.scale-count {
+  width: 56px;
+  flex: 0 0 auto;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+}
 
 /* Every button says where the keyboard is, not only the ones in the toolbar. */
 button.ghost:focus-visible { outline: 1px solid var(--accent-dim); outline-offset: 0; }

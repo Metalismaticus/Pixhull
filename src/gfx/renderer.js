@@ -214,9 +214,21 @@ export class Renderer {
 
   /** @param {import('../core/palette.js').Palette} palette */
   setPalette(palette) {
+    this.setPaletteData(palette.toTextureData());
+  }
+
+  /**
+   * The lookup texture straight from bytes, for a colouring that is not the
+   * model's own - the disagreement map draws the same faces through a
+   * six-colour scale (`src/core/disagree.js`). The model's palette is left
+   * untouched, so putting it back is one more call with the real one.
+   *
+   * @param {Uint8Array} data PALETTE_MAX x 1 RGBA8, slot 0 transparent
+   */
+  setPaletteData(data) {
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.paletteTex);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, PALETTE_MAX, 1, gl.RGBA, gl.UNSIGNED_BYTE, palette.toTextureData());
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, PALETTE_MAX, 1, gl.RGBA, gl.UNSIGNED_BYTE, data);
   }
 
   /**

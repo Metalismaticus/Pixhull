@@ -18,6 +18,7 @@
 import { Volume, DIRS, DIR_PX, DIR_NX, DIR_PY, DIR_NY, DIR_PZ, DIR_NZ } from './volume.js';
 import { VIEW_GEOM, VIEW_NAMES } from './views.js';
 import { findLookalikeViews } from './diagnose.js';
+import { disagreementMap } from './disagree.js';
 import { densityField, facingOf, FACE_DIRS } from './field.js';
 import { PALETTE_MAX } from './palette.js';
 import { quantize } from './quantize.js';
@@ -122,11 +123,14 @@ function progressReporter(onProgress) {
  * @param {import('./views.js').SourceView[]} views
  * @param {number} N grid size
  * @param {import('./palette.js').Palette} palette
- * @param {{mirrorMissing?: boolean, slopeColour?: boolean,
+ * @param {{mirrorMissing?: boolean, slopeColour?: boolean, map?: boolean,
  *   onProgress?: (fraction: number, stage: string) => void}} [opts] `onProgress`
  *   is called with a number rising from 0 to 1 and the name of the stage
  *   running; it is how a build off the main thread can show how far it has got.
- * @returns {{volume: Volume, stats: CarveStats}}
+ *   `map` asks for the disagreement map alongside the model; it costs one pass
+ *   over the depth buffers and nothing at all when left off.
+ * @returns {{volume: Volume, map: import('./disagree.js').DisagreementMap|null,
+ *   stats: CarveStats}}
  */
 export function carve(views, N, palette, opts = {}) {
   const t0 = performance.now();
@@ -180,7 +184,7 @@ export function carve(views, N, palette, opts = {}) {
 
   const vol = Volume.cube(N);
   if (active.length === 0) {
-    return { volume: vol, stats: { solid: 0, painted: 0, inferred: 0, mirrored: [], lookalikes: [], ms: 0 } };
+    return { volume: vol, map: null, stats: { solid: 0, painted: 0, inferred: 0, mirrored: [], lookalikes: [], ms: 0 } };
   }
 
   // Before mirroring: a synthesised view is a copy of its opposite by
@@ -243,6 +247,12 @@ export function carve(views, N, palette, opts = {}) {
 
   report.begin('paint');
   const { painted, dominant, seen } = paintFromViews(vol, raster, N, report);
+  // Built from what the painting pass saw, before the slope repaint edits any
+  // face: the map reports what the *drawings* said, not what the tool did with
+  // it afterwards. Mirrored views are left out - see `disagreementMap`.
+  const map = opts.map
+    ? disagreementMap(raster, seen, N, palette, active)
+    : null;
   report.begin('slopes');
   if (field && opts.slopeColour !== false) repaintSlopes(vol, raster, N, seen, field, box, report);
   field?.releaseGradient();
@@ -252,6 +262,7 @@ export function carve(views, N, palette, opts = {}) {
 
   return {
     volume: vol,
+    map,
     stats: {
       solid: vol.solidCount,
       painted,

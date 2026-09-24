@@ -39,6 +39,7 @@ if (typeof self !== 'undefined' && typeof self.postMessage === 'function') {
         faces: result.faces,
         palette: result.palette,
         stats: result.stats,
+        map: result.map,
         box: result.box,
       }, result.transfer);
     } catch (err) {

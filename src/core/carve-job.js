@@ -42,6 +42,9 @@ const GEOMETRY_FROM = 0.8;
  * @property {{buffer: ArrayBuffer, count: number}} faces instances for the renderer
  * @property {ReturnType<import('./palette.js').Palette['snapshot']>} palette
  * @property {import('./carve.js').CarveStats} stats
+ * @property {import('./disagree.js').DisagreementMap|null} map where the
+ *   drawings disagree about a voxel's colour; plain typed arrays, so it crosses
+ *   `postMessage` as it is
  * @property {{min: number[], max: number[]}|null} box
  * @property {ArrayBuffer[]} transfer buffers to hand over rather than copy
  */
@@ -54,8 +57,11 @@ const GEOMETRY_FROM = 0.8;
 export function runCarveJob(job, onProgress) {
   const views = job.views.map((s) => SourceView.fromSnapshot(s));
   const palette = new Palette();
-  const { volume, stats } = carve(views, job.N, palette, {
+  const { volume, stats, map } = carve(views, job.N, palette, {
     mirrorMissing: job.mirrorMissing,
+    // Always, not on demand: it is built from the depth buffers the paint pass
+    // is holding anyway, and rebuilding it later would mean carving again.
+    map: true,
     onProgress: onProgress && ((f, stage) => onProgress(f * GEOMETRY_FROM, stage)),
   });
 
@@ -75,7 +81,14 @@ export function runCarveJob(job, onProgress) {
     faces,
     palette: palette.snapshot(),
     stats,
+    map,
     box,
-    transfer: [...Volume.transferables(packed), faces.buffer],
+    transfer: [
+      ...Volume.transferables(packed),
+      faces.buffer,
+      ...(map ? [map.index.buffer, map.delta.buffer, map.band.buffer,
+        map.viewA.buffer, map.viewB.buffer, map.colorA.buffer,
+        map.colorB.buffer, map.counts.buffer] : []),
+    ],
   };
 }

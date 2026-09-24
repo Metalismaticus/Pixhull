@@ -44,6 +44,7 @@ function cancelled() {
  * @property {Palette} palette
  * @property {import('../core/carve.js').CarveStats} stats
  * @property {{buffer: ArrayBuffer, count: number}} faces
+ * @property {import('../core/disagree.js').DisagreementMap|null} map
  * @property {{min: number[], max: number[]}|null} box
  * @property {boolean} onMainThread true when no worker could be used
  */
@@ -91,6 +92,7 @@ function carveHere(job, onProgress, resolve, reject) {
       palette: Palette.fromSnapshot(r.palette),
       stats: r.stats,
       faces: r.faces,
+      map: r.map,
       box: r.box,
       onMainThread: true,
     });
@@ -142,6 +144,7 @@ export function startBuild(job, onProgress) {
         palette: Palette.fromSnapshot(msg.palette),
         stats: msg.stats,
         faces: msg.faces,
+        map: msg.map,
         box: msg.box,
         onMainThread: false,
       });

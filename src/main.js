@@ -17,6 +17,7 @@ import { exportGlb } from './export/gltf.js';
 import { buildSmoothMesh } from './export/surfacenets.js';
 import { makeZip, blobBytes } from './export/zip.js';
 import { buildDemoViews } from './demo.js';
+import { mapInstances, mapAt, bandTextureData, BANDS, BAND_LONELY } from './core/disagree.js';
 import { t, num, getLang, setLang, applyTranslations } from './i18n.js';
 import { detectTheme, getTheme, setTheme, toggleTheme, cssColorToGl } from './ui/theme.js';
 import { screenRay, raycastVoxel, rayPlanePoint } from './edit/pick.js';
@@ -53,6 +54,16 @@ const state = {
   volume: null,
   /** @type {import('./core/carve.js').CarveStats | null} */
   lastStats: null,
+  /**
+   * Where the drawings disagreed about a voxel's colour, as the last build saw
+   * it, or null. Null is not an error: a project loaded from a file has a model
+   * and no map, because the map is made of the drawings, not of the model
+   * (`src/core/serialize.js` keeps neither, and should not).
+   * @type {import('./core/disagree.js').DisagreementMap | null}
+   */
+  map: null,
+  /** the viewport is showing the map instead of the model's own colours */
+  mapOn: false,
   /** Source pixels per grid cell in the last build; 1 means art was used 1:1. */
   fitScale: 1,
   /** @type {{name: string|null, amount: number}} the view that agreed least with the rest */
@@ -386,6 +397,7 @@ function dropBuild() {
   showBuildProgress(null);
   refreshMergeOffer();
   refreshSelectionPanel();
+  refreshMapPanel();
 }
 
 /**
@@ -406,11 +418,15 @@ async function build() {
   const views = [...state.views.values()];
   if (views.length === 0) {
     dropBuild();
+    dropMap();
     state.volume = null;
     state.lastStats = null;
     renderer.instanceCount = 0;
     $('viewport-empty').classList.remove('hidden');
     updateStats(null, 0);
+    // After the volume goes, not before: the reason under the checkbox is
+    // "there is no model yet", and it can only be read off a model that is gone.
+    refreshMapPanel();
     state.dirty = true;
     status('status.ready');
     return;
@@ -429,6 +445,9 @@ async function build() {
   const job = { views: views.map((v) => v.snapshot()), N, mirrorMissing };
 
   state.building = true;
+  // The map belongs to the model being replaced, and it is not recomputed until
+  // this build lands; it goes now rather than describing a model that is gone.
+  dropMap();
   // The buttons under the block go dark while the volume is being replaced,
   // and say why; the block itself goes when the new volume lands.
   refreshSelectionPanel();
@@ -448,6 +467,7 @@ async function build() {
     showBuildProgress(null);
     refreshMergeOffer();
     refreshSelectionPanel();
+    refreshMapPanel();
     status('status.buildFailed', { err: String(err instanceof Error ? err.message : err) }, 'error');
     return;
   }
@@ -461,10 +481,12 @@ async function build() {
   state.palette = built.palette;
   state.volume = volume;
   state.lastStats = stats;
+  state.map = built.map;
+  mapFaces = null;
 
   state.history.clear();
   refreshHistoryButtons();
-  renderer.setPalette(state.palette);
+  uploadPalette();
   refreshPalette();
   scheduleUsage();
   clearHover();
@@ -477,6 +499,7 @@ async function build() {
   updateStats(stats, faces, box);
   updateZoomLabel();
   updateFramePreview();
+  refreshMapPanel();
   // The solvers turn and mirror views inside the carve, so the slots have to be
   // redrawn afterwards. Showing them untouched while the model had been turned
   // meant pressing H fought an invisible flip - and locked the view into a state
@@ -562,6 +585,259 @@ function updateStats(stats, faces, bounds) {
     b2.textContent = value;
     row.appendChild(b2);
     el.appendChild(row);
+  }
+}
+
+
+// ------------------------------------------------------- disagreement map
+
+/**
+ * Where the six drawings disagree, drawn over the model.
+ *
+ * Nothing here edits anything. The map is a second colouring of the same
+ * exposed faces: its own instance buffer, its own six-colour lookup texture,
+ * and the model's own palette and face bytes left exactly where they were
+ * (`docs/ROADMAP.md`, "Карта расхождений"; the screen is specified in
+ * `docs/specs/2026-09-24-3-disagreement-map.md`).
+ */
+
+/** Band colours, loudest first, as the stylesheet defines them. */
+const MAP_VARS = ['--map-max', '--map-high', '--map-mid', '--map-low', '--map-agree', '--map-none'];
+
+/**
+ * The ranges beside each band. Numbers and symbols, so they are not
+ * translated - and they are written here rather than derived so that the scale
+ * on screen reads the way the thresholds do in `disagree.js`.
+ */
+const BAND_RANGES = ['\u2265 50', '25\u201350', '10\u201325', '3\u201310', '< 3', '\u2014'];
+
+/**
+ * The map's instances, cached: building them walks every solid voxel, and the
+ * checkbox may be flicked on and off while the artist looks. Dropped whenever
+ * the model or the map changes.
+ * @type {{buffer: ArrayBuffer, count: number} | null}
+ */
+let mapFaces = null;
+
+/** Why the map cannot be shown, as an i18n key, or null when it can. */
+function mapDisabledReason() {
+  if (state.building) return 'view.mapBuilding';
+  if (!state.volume || state.volume.solidCount === 0) return 'view.mapNoModel';
+  if (!state.map) return 'view.mapNoData';
+  return null;
+}
+
+/** The six band colours as 0..255 triples, read out of the active theme. */
+function bandColours() {
+  return MAP_VARS.map((name) => {
+    const [r, g, b] = cssColorToGl(name);
+    return /** @type {[number, number, number]} */ (
+      [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)]);
+  });
+}
+
+/**
+ * A count for a 56px monospaced column: nine digits fit, more do not, and a
+ * column that grows or wraps would take the scale apart. Past that the order of
+ * magnitude is what the number is for anyway.
+ * @param {number} n
+ */
+function shortCount(n) {
+  const full = num(n);
+  if (full.length <= 9) return full;
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'G';
+  return (n / 1e6).toFixed(1) + 'M';
+}
+
+/** The lookup texture and the instances the viewport should be drawing. */
+function applyViewColours() {
+  if (!state.volume) return;
+  if (state.mapOn && state.map) {
+    if (!mapFaces) mapFaces = mapInstances(state.volume, state.map);
+    renderer.setPaletteData(bandTextureData(bandColours()));
+    renderer.setVolume(state.volume, mapFaces);
+    // The map lives on voxel faces, and the smooth mesh has none; the face tint
+    // would move a colour further than the gap between two bands, which would
+    // make the scale a lie (spec §10.2).
+    renderer.useSmooth = false;
+    renderer.shade = 0;
+  } else {
+    renderer.setPalette(state.palette);
+    renderer.setVolume(state.volume);
+    renderer.useSmooth = smoothPreviewOn();
+    if (renderer.useSmooth) {
+      renderer.setSmoothMesh(buildSmoothMesh(state.volume, { relax: relaxAmount() }));
+    }
+    renderer.shade = /** @type {HTMLInputElement} */ ($('shade-toggle')).checked ? 1 : 0;
+  }
+  state.dirty = true;
+}
+
+/** The palette texture, unless the map is borrowing it. */
+function uploadPalette() {
+  if (state.mapOn) return;
+  renderer.setPalette(state.palette);
+}
+
+/** The checkbox, its one line of explanation, the figures and the scale. */
+function refreshMapPanel() {
+  const box = /** @type {HTMLInputElement} */ ($('map-toggle'));
+  const why = mapDisabledReason();
+  box.disabled = why !== null;
+  box.checked = state.mapOn;
+
+  // One line under the checkbox, never two: either what the map does or why it
+  // cannot run (`docs/DESIGN.md`, section 6 - a control that goes dark says so).
+  const hint = $('map-hint');
+  hint.textContent = t(why ?? 'view.mapHint');
+  hint.classList.toggle('warn', why !== null);
+
+  $('map-block').classList.toggle('hidden', !state.mapOn);
+  $('map-export-note').classList.toggle('hidden', !state.mapOn);
+  $('map-smooth-note').classList.toggle('hidden', !state.mapOn);
+  if (!state.mapOn || !state.map) return;
+
+  const map = state.map;
+  $('map-readout').textContent = map.disputed === 0
+    ? t('view.mapNone')
+    : t('view.mapCount', {
+      n: map.disputed,
+      total: map.total,
+      pct: (map.total ? (100 * map.disputed) / map.total : 0).toFixed(1),
+    });
+
+  const host = $('map-scale');
+  host.textContent = '';
+  for (let i = 0; i < BANDS.length; i++) {
+    const row = document.createElement('div');
+    row.className = 'scale-row' + (map.counts[i] === 0 ? ' empty' : '');
+    const chip = document.createElement('span');
+    chip.className = 'scale-chip';
+    chip.style.background = 'var(' + MAP_VARS[i] + ')';
+    const range = document.createElement('span');
+    range.className = 'scale-range';
+    range.textContent = BAND_RANGES[i];
+    const name = document.createElement('span');
+    name.className = 'scale-name';
+    name.textContent = t(BANDS[i].key);
+    const count = document.createElement('span');
+    count.className = 'scale-count';
+    count.textContent = shortCount(map.counts[i]);
+    row.append(chip, range, name, count);
+    host.appendChild(row);
+  }
+}
+
+/**
+ * Turn the map on or off.
+ *
+ * On: the tool goes back to Rotate, the block is dropped and the six editing
+ * tools go dark. Painting a model whose colours are not on screen is a trap,
+ * and the block's actions are edits (spec §10.5). Off: the model comes back in
+ * its own colours and Rotate stays - silently re-arming an eraser would be
+ * worse than leaving the safe tool selected.
+ *
+ * @param {boolean} on
+ */
+function setMapMode(on) {
+  const want = on && mapDisabledReason() === null;
+  if (want === state.mapOn) {
+    refreshMapPanel();
+    return;
+  }
+  state.mapOn = want;
+  if (want) {
+    clearSelection();
+    setTool('orbit');
+  }
+  clearHover();
+  applyViewColours();
+  markActiveTool();
+  refreshToolControls();
+  refreshMapPanel();
+  if (want && state.map) {
+    status('status.mapOn', { n: state.map.disputed, total: state.map.total });
+  } else if (!want) {
+    status('status.ready');
+  }
+}
+
+/** The map is made of the drawings; a new model means a new map or none. */
+function dropMap(map = null) {
+  if (state.mapOn) setMapMode(false);
+  state.map = map;
+  mapFaces = null;
+  refreshMapPanel();
+}
+
+/**
+ * What the map says about the voxel under the cursor.
+ *
+ * `updateHover` gives up as soon as the tool is Rotate, and Rotate is exactly
+ * the tool the map mode runs in, so the map does its own reading here. It only
+ * reads: no outline, no highlight, no armed face - the pointer promises
+ * nothing in this mode.
+ *
+ * @param {{x: number, y: number, z: number}} hit
+ */
+function mapHoverLine(hit) {
+  const map = state.map;
+  const at = map ? mapAt(map, hit.x, hit.y, hit.z) : null;
+  // Coordinates as strings: as numbers they would be given thousands
+  // separators, and "1,024" is not a coordinate.
+  const where = { x: String(hit.x), y: String(hit.y), z: String(hit.z) };
+  if (!at) {
+    setHoverLine('status.mapUnknown', where);
+    return;
+  }
+  const nameOf = (i) => t('views.' + VIEW_NAMES[i]);
+  if (at.band === BAND_LONELY || at.viewB === 255) {
+    setHoverLine('status.mapLonely', { ...where, a: nameOf(at.viewA) });
+    return;
+  }
+  setHoverLine('status.mapHit', {
+    ...where,
+    a: nameOf(at.viewA),
+    b: nameOf(at.viewB),
+    d: at.delta.toFixed(1),
+    ha: state.palette.hex(at.colorA),
+    hb: state.palette.hex(at.colorB),
+  });
+}
+
+/** @param {PointerEvent} e */
+function updateMapHover(e) {
+  const vol = state.volume;
+  if (!vol) return;
+  const [sx, sy] = canvasPoint(e);
+  const ray = screenRay(camera, sx, sy, canvas.width, canvas.height);
+  const hit = raycastVoxel(vol, ray.origin, ray.dir);
+  if (!hit) {
+    clearHover();
+    return;
+  }
+  updateCellGrid(hit);
+  const key = ((hit.x * vol.ny + hit.y) * vol.nz + hit.z) * 6 + hit.face;
+  if (key === hoverKey) return;
+  hoverKey = key;
+  mapHoverLine(hit);
+}
+
+/**
+ * Run something with the model's own colours on the GPU, whatever the viewport
+ * is showing. Every export goes through the model, never the map (spec §6.6).
+ * @template T @param {() => T} fn
+ */
+function withModelColours(fn) {
+  if (!state.mapOn) return fn();
+  const on = state.mapOn;
+  state.mapOn = false;
+  applyViewColours();
+  try {
+    return fn();
+  } finally {
+    state.mapOn = on;
+    applyViewColours();
   }
 }
 
@@ -804,6 +1080,9 @@ function buildToolBar() {
 
 /** @param {typeof state.tool} tool */
 function setTool(tool) {
+  // A viewing mode has one tool. Asking for another from the keyboard or the
+  // toolbar is refused rather than silently obeyed.
+  if (state.mapOn && tool !== 'orbit') return;
   const wasBox = isBoxTool();
   state.tool = tool;
   // A block belongs to the box tool; leaving the tool leaves the block.
@@ -834,7 +1113,15 @@ function markActiveTool() {
  * brings its own line saying why.
  */
 function refreshToolControls() {
-  $('tool-hint').textContent = t(isBoxTool() ? 'edit.boxHint' : 'tool.' + state.tool + '.hint');
+  const hint = $('tool-hint');
+  hint.textContent = state.mapOn
+    ? t('edit.mapReadOnly')
+    : t(isBoxTool() ? 'edit.boxHint' : 'tool.' + state.tool + '.hint');
+  hint.classList.toggle('warn', state.mapOn);
+  for (const b of $('tool-bar').querySelectorAll('button')) {
+    const el = /** @type {HTMLButtonElement} */ (b);
+    el.disabled = state.mapOn && el.dataset.tool !== 'orbit';
+  }
 
   const brush = /** @type {HTMLInputElement} */ ($('brush-size'));
   const brushOff = BRUSHLESS_TOOLS.has(state.tool);
@@ -1067,7 +1354,7 @@ function applyRecolour() {
   if (!Number.isFinite(n)) return;
   if (!state.palette.replace(recolourSlot, (n >> 16) & 255, (n >> 8) & 255, n & 255)) return;
   state.history.pushPalette(recolourSlot, recolourBefore, state.palette.colors[recolourSlot] | 0);
-  renderer.setPalette(state.palette);
+  uploadPalette();
   updateSwatch(recolourSlot);
   // A recolour moves one colour in Lab, so the near-duplicate pairs are not the
   // ones the panel promised a moment ago: measured, #ff8844 + #fe8845 offered
@@ -1154,7 +1441,7 @@ function mergeColors() {
   // colour rather than pointing at a hole.
   if (!state.palette.has(state.color)) state.color = plan.remap[state.color] || 1;
 
-  renderer.setPalette(state.palette);
+  uploadPalette();
   // Every face instance carries its palette byte, so the buffer is stale.
   state.geometryDirty = true;
   refreshPalette();
@@ -1340,7 +1627,7 @@ function redo() {
  */
 function afterHistoryStep(kind) {
   if (kind === 'palette' || kind === 'merge') {
-    renderer.setPalette(state.palette);
+    uploadPalette();
     // Undoing a merge brings a freed slot back; redoing one takes it away
     // again, and the selection must never sit on a hole.
     if (!state.palette.has(state.color)) state.color = 1;
@@ -1753,6 +2040,12 @@ function setHoverLine(key, params) {
  */
 function updateHover(e) {
   const vol = state.volume;
+  // The map reads under the cursor in a mode whose tool is Rotate, so it has to
+  // come before the guard that sends Rotate away (spec §6.3).
+  if (state.mapOn && vol && !boxDrag) {
+    updateMapHover(e);
+    return;
+  }
   if (!vol || state.tool === 'orbit' || boxDrag) {
     clearHover();
     return;
@@ -2073,7 +2366,8 @@ async function exportSheet() {
   await nextFrame();
   try {
     const opts = turnaroundOptions();
-    const { frames, meta } = renderTurnaround(renderer, state.volume, exportCamera, opts);
+    const { frames, meta } = withModelColours(
+      () => renderTurnaround(renderer, state.volume, exportCamera, opts));
     if (opts.shaded) for (const f of frames) snapToPalette(f, state.palette);
     const { image } = packSheet(frames, meta.frameW, meta.frameH);
     downloadBlob(await imageDataToPng(image), 'pixhull-sheet-' + meta.count + 'dir.png');
@@ -2089,7 +2383,8 @@ async function exportFrames() {
   await nextFrame();
   try {
     const opts = turnaroundOptions();
-    const { frames, meta } = renderTurnaround(renderer, state.volume, exportCamera, opts);
+    const { frames, meta } = withModelColours(
+      () => renderTurnaround(renderer, state.volume, exportCamera, opts));
     if (opts.shaded) for (const f of frames) snapToPalette(f, state.palette);
 
     /** @type {Array<{name: string, data: Uint8Array}>} */
@@ -2276,9 +2571,12 @@ async function loadProject(file) {
       state.palette = Palette.deserialize(data.palette);
       state.volume = deserializeVolume(data.volume);
       state.lastStats = { solid: state.volume.solidCount, painted: 0, inferred: 0, mirrored: [], ms: 0 };
+      // A saved project carries voxels, not drawings, so there is nothing to
+      // disagree: the checkbox goes dark and says to build again (spec §6.4).
+      dropMap();
       state.history.clear();
       refreshHistoryButtons();
-      renderer.setPalette(state.palette);
+      uploadPalette();
       refreshPalette();
       const faces = renderer.setVolume(state.volume);
       const box = state.volume.bounds();
@@ -2323,10 +2621,13 @@ function frame() {
   if (state.geometryDirty && state.volume) {
     // Dragging a brush can touch the model dozens of times per frame; rebuild
     // once instead of once per event.
-    const faces = renderer.setVolume(state.volume);
+    // Undo and redo still work in map mode, so the map's own instances can go
+    // stale there too; they are rebuilt from the same walk.
+    if (state.mapOn && state.map) mapFaces = mapInstances(state.volume, state.map);
+    const faces = renderer.setVolume(state.volume, state.mapOn ? mapFaces ?? undefined : undefined);
     // The voxel buffer is rebuilt either way so the face count stays honest and
     // the grid wireframe stays in step; the smooth mesh is extra on top.
-    renderer.useSmooth = smoothPreviewOn();
+    renderer.useSmooth = state.mapOn ? false : smoothPreviewOn();
     if (renderer.useSmooth) {
       renderer.setSmoothMesh(buildSmoothMesh(state.volume, { relax: relaxAmount() }));
     }
@@ -2369,6 +2670,9 @@ function applyThemeToRenderer() {
   );
   renderer.boundsColor = [rgb[0], rgb[1], rgb[2], Number.isFinite(alpha) ? alpha : 0.12];
   renderer.previewColor = cssColorToGl('--accent');
+  // The scale's six colours come out of the stylesheet too, and they are on the
+  // GPU as a texture rather than as CSS: a theme switch has to re-upload them.
+  if (state.mapOn) applyViewColours();
   state.dirty = true;
 }
 
@@ -2396,6 +2700,7 @@ function retranslate() {
   // to be asked to rewrite itself.
   refreshVoxAvailability();
   refreshSelectionPanel();
+  refreshMapPanel();
   updateZoomLabel();
   renderStatus();
   updateStats(state.lastStats, renderer.instanceCount);
@@ -2536,7 +2841,7 @@ function init() {
     const wasFull = state.palette.full;
     const idx = state.palette.add((n >> 16) & 255, (n >> 8) & 255, n & 255);
     state.color = idx;
-    renderer.setPalette(state.palette);
+    uploadPalette();
     refreshPalette();
     scheduleUsage();
     state.dirty = true;
@@ -2587,8 +2892,14 @@ function init() {
   });
 
   $('shade-toggle').addEventListener('change', (e) => {
-    renderer.shade = /** @type {HTMLInputElement} */ (e.target).checked ? 1 : 0;
+    // Shading stays off while the map is on - it would shift a band's colour
+    // further than the gap to the next band. The checkbox keeps its value and
+    // takes effect again the moment the map goes.
+    if (!state.mapOn) renderer.shade = /** @type {HTMLInputElement} */ (e.target).checked ? 1 : 0;
     state.dirty = true;
+  });
+  $('map-toggle').addEventListener('change', (e) => {
+    setMapMode(/** @type {HTMLInputElement} */ (e.target).checked);
   });
   $('bounds-toggle').addEventListener('change', () => { state.dirty = true; });
 
@@ -2720,8 +3031,15 @@ function init() {
       return;
     }
 
+    // D for disagreement. Free: the tools have taken v b g e a i r.
+    if (e.key === 'd' || e.key === 'D') {
+      if (state.mapOn || mapDisabledReason() === null) setMapMode(!state.mapOn);
+      return;
+    }
+
     // Alt is the picker on loan: hold it, take a colour, let go and the tool
     // you were using is back, without a trip to the toolbar.
+    if (state.mapOn) return;
     if (e.key === 'Alt' && altBorrowedFrom === null && state.tool !== 'pick') {
       altBorrowedFrom = state.tool;
       setTool('pick');
@@ -2741,6 +3059,7 @@ function init() {
   });
 
   refreshToolControls();
+  refreshMapPanel();
   // The grid's threshold is written under its checkbox from the first frame,
   // not only once a model has been built.
   updateZoomLabel();

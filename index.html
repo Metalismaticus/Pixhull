@@ -188,6 +188,18 @@
       <label for="mirror-toggle" data-i18n="view.mirror"></label>
     </div>
     <p class="hint" data-i18n="view.mirrorHint"></p>
+    <div class="field checkbox">
+      <input type="checkbox" id="map-toggle">
+      <label for="map-toggle" data-i18n="view.map"></label>
+    </div>
+    <!-- The hint under the map takes the place of itself when the checkbox is
+         off: one line, either what the map does or why it cannot run. -->
+    <p class="hint" id="map-hint"></p>
+    <div class="map-block hidden" id="map-block">
+      <p class="readout" id="map-readout"></p>
+      <div class="scale" id="map-scale"></div>
+      <p class="hint" data-i18n="view.mapHover"></p>
+    </div>
 
     <h2 data-i18n="export.heading"></h2>
     <div class="field">
@@ -219,6 +231,7 @@
     <p class="hint" id="frame-preview">—</p>
 
     <button id="btn-export-sheet" class="primary" type="button" data-i18n="export.sheet"></button>
+    <p class="hint hidden" id="map-export-note" data-i18n="export.mapNote"></p>
     <button id="btn-export-frames" class="ghost" type="button" data-i18n="export.frames"></button>
 
     <h2 data-i18n="model.heading"></h2>
@@ -232,6 +245,7 @@
       <span class="unit" id="relax-label">0</span>
     </div>
     <p class="hint" data-i18n="model.smoothHint"></p>
+    <p class="hint hidden" id="map-smooth-note" data-i18n="model.smoothMapNote"></p>
     <button id="btn-export-obj" class="ghost" type="button" data-i18n="model.obj"></button>
     <button id="btn-export-glb" class="ghost" type="button" data-i18n="model.glb"></button>
     <button id="btn-export-vox" class="ghost" type="button" data-i18n="model.vox"></button>
