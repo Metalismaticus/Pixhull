@@ -206,11 +206,20 @@ It is checkable, though. Views spanning different axis pairs should not look
 alike — front spans (x, y) and top spans (x, z) — so if their silhouettes
 match, the same drawing is in both slots. Opposite views are expected to match
 and are exempt. Each silhouette is normalised into a 32×32 stamp of its own
-bounding box first, so aspect and placement cannot disguise the match.
+bounding box first, so placement cannot disguise the match.
+
+Aspect, however, is a gate rather than a disguise. A pair is only reported
+when both drawings have near-identical proportions — within
+`PROPORTION_TOLERANCE = 1.15` — because two real projections of the same
+object rarely do, while the same drawing sitting in two slots always does.
+That gate is what keeps the built-in demo quiet: its front/right pair scores
+0.81 on shape but 1.92 on proportion.
 
 On a real sheet whose bottom two drawings were three-quarter beauty shots
 rather than projections, top vs front scored 0.79 and top vs back 0.81,
 against 0.52 for the genuine side view. The status bar now names the pair.
+The known cost: a mixed pair — one three-quarter shot against one true
+projection — falls outside the proportion gate and is dropped silently.
 ### A palette chosen by coverage, not by arrival
 
 Colours used to be interned in the order they were met, which is how a white
