@@ -49,6 +49,30 @@ const CUBE_EDGES = [
 ];
 
 /**
+ * How far inside its own cell a vertex has to stay, as a fraction of a cell.
+ *
+ * The solution is clamped to the cell it belongs to - a vertex that wandered
+ * into the neighbour's cell would fold the mesh. Clamping to the closed cell,
+ * though, lets two neighbouring cells land on the *same* point: a wall one
+ * voxel thick pulls the vertices on both of its sides towards its middle, both
+ * stop at the shared cell wall, and the quads along the rim collapse to a
+ * line. A collapsed quad has no normal, so `src/gfx/renderer.js` falls back on
+ * `|| 1` and draws it black, and the `.obj` and `.glb` carry zero-area faces
+ * out of the product. Keeping the vertex strictly inside its own cell makes
+ * the collapse impossible - neighbouring vertices are then at least two
+ * margins apart - and costs a sixty-fourth of a voxel.
+ *
+ * Measured 2026-09-24 on the fin (one voxel thick, rounding 1): 48 quads with
+ * two corners at the same point and 34 quads of zero area out of 880 without
+ * this, 0 and 0 with it. What it costs, measured the same day on the test
+ * bench's five shapes at 20^3 over roundings 1 to 6, as the RMS distance a
+ * vertex moves when the clamp is switched on: the 45-degree wedge 0.0076 to
+ * 0.0106 of a voxel, the other four inside the same band (0.0030 to 0.0114),
+ * against the 1/64 = 0.0156 this margin can ever move a vertex by.
+ */
+const CELL_MARGIN = 1 / 64;
+
+/**
  * Where to put a cell's vertex, given the crossings and the surface normals
  * there: at the point that lies on all of their planes at once, or as close
  * to it as a point can get.
@@ -99,7 +123,9 @@ function solveVertex(normals, points, mass) {
     }
   }
   const out = [0, 1, 2].map((i) => (Math.abs(m[i][i]) < 1e-9 ? mass[i] : m[i][3] / m[i][i]));
-  return out.map((v, i) => (Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : mass[i]));
+  return out.map((v, i) => (Number.isFinite(v)
+    ? Math.min(1 - CELL_MARGIN, Math.max(CELL_MARGIN, v))
+    : mass[i]));
 }
 
 /**
