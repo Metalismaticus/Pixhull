@@ -7,7 +7,8 @@ import { Palette, MERGE_DELTA_E } from './core/palette.js';
 import { SourceView, VIEW_NAMES, suggestGridSize, fitViews } from './core/views.js';
 import { decodeImage, toImageData } from './ui/decode.js';
 import { startBuild, cancelBuild } from './ui/build-task.js';
-import { detectCells, cropCell, guessViews } from './core/sheet.js';
+import { detectCells, cropCell, guessViews, solveBySize } from './core/sheet.js';
+import { packViewSheet } from './core/viewsheet.js';
 import { Renderer } from './gfx/renderer.js';
 import { OrthoCamera, PITCH_PRESETS, directionYaws, DEG } from './gfx/camera.js';
 import { renderTurnaround, packSheet, snapToPalette, imageDataToPng, downloadBlob } from './export/sprite.js';
@@ -950,12 +951,10 @@ function refreshSheetCells() {
 
   sheet.cells = detectCells(sheet.image, { gap });
   const guessed = guessViews(sheet.cells);
-  // guessViews only names front, right and top when the sizes leave no doubt;
-  // anything else is reading order, which is a guess and should not claim to be
-  // more than that.
-  const confident =
-    sheet.cells.length === 3 &&
-    ['front', 'right', 'top'].every((name) => guessed.includes(name));
+  // The sizes identify the views on a three-cell sheet and on a six-cell one,
+  // and only when they leave no doubt; anything else is reading order, which is
+  // a guess and should not claim to be more than that.
+  const confident = solveBySize(sheet.cells) !== null;
 
   $('sheet-summary').textContent = sheet.cells.length === 0
     ? t('sheet.none')
@@ -2377,6 +2376,29 @@ async function exportSheet() {
   }
 }
 
+/**
+ * The model back out as one sheet of six drawings - the other half of the
+ * round trip that `Slice a sheet` starts.
+ *
+ * Deliberately an ordinary PNG with no metadata beside it: it comes back in
+ * through the same slicer a stranger's sheet does, so there is one way in to
+ * keep honest. What it carries is the silhouette and the colours a view can
+ * see; the hint under the button says so, because a face no view looks at and
+ * the edit history do not survive the trip, and finding that out afterwards
+ * would be finding it out too late.
+ */
+async function exportViewSheet() {
+  if (!state.volume) return;
+  try {
+    const { image, cells } = packViewSheet(state.volume, state.palette);
+    const png = await imageDataToPng(new ImageData(image.data, image.width, image.height));
+    downloadBlob(png, 'pixhull-views-' + image.width + 'x' + image.height + '.png');
+    status('status.exportedViews', { n: cells.length, w: image.width, h: image.height });
+  } catch (err) {
+    status('status.badImage', { err: String(err instanceof Error ? err.message : err) }, 'error');
+  }
+}
+
 async function exportFrames() {
   if (!state.volume) return;
   status('status.rendering');
@@ -2913,6 +2935,7 @@ function init() {
   $('pitch-preset').addEventListener('change', updateFramePreview);
 
   $('btn-export-sheet').addEventListener('click', exportSheet);
+  $('btn-export-views').addEventListener('click', exportViewSheet);
   $('btn-export-frames').addEventListener('click', exportFrames);
   $('btn-export-obj').addEventListener('click', doExportObj);
   $('btn-export-glb').addEventListener('click', doExportGlb);

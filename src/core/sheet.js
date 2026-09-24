@@ -136,6 +136,32 @@ const TRIPLES = [
   [1, 2, 0], [2, 0, 1], [2, 1, 0],
 ];
 
+/** Every way six cells could pair up into three opposite pairs. */
+const PAIRINGS = sixPairings();
+
+/**
+ * The fifteen ways to split six cells into three unordered pairs, each pair
+ * written smaller index first so reading order decides which member is the
+ * near side.
+ * @returns {number[][][]}
+ */
+function sixPairings() {
+  /** @type {number[][][]} */
+  const out = [];
+  const rest = [1, 2, 3, 4, 5];
+  for (let a = 0; a < 5; a++) {
+    const left = rest.filter((_, i) => i !== a);
+    for (let b = 0; b < 3; b++) {
+      const tail = left.filter((_, i) => i !== 0 && i !== b + 1);
+      out.push([[0, rest[a]], [left[0], left[b + 1]], [tail[0], tail[1]]]);
+    }
+  }
+  return out;
+}
+
+/** Which two view names a solved pair carries, near side first. */
+const PAIR_ROLES = [['front', 'back'], ['right', 'left'], ['top', 'bottom']];
+
 /**
  * Guess which cell is which view.
  *
@@ -145,33 +171,100 @@ const TRIPLES = [
  * arrangement satisfies all three, and that is the answer - no guessing from
  * layout conventions that every artist follows differently.
  *
- * Failing that, reading order with the common front / right / top ordering,
- * which the UI lets you correct in a click.
+ * With six the same arithmetic runs one level up. Opposite views are the same
+ * size as each other, so the cells fall into three pairs, and the three pairs
+ * carry the axes X×Y, Z×Y and X×Z - which pair is which is again decided by
+ * the axes they share. Sizes cannot tell front from back, so within a pair the
+ * near side is the one that comes first in reading order.
+ *
+ * Failing that, reading order: `front, right, top` for three cells, and the
+ * model's own view order for anything else. That fallback is what the tool's
+ * own exported sheets are laid out in, and what the owner's six-cell reference
+ * sheet turned out to be laid out in too - under the old `front, right, top,
+ * back, left, bottom` guess four of its six drawings went to the wrong slot,
+ * and the model came out 3 360 885 voxels instead of 3 174 409.
  *
  * @param {Cell[]} cells
  * @returns {Array<string | null>} a view name per cell, or null to ignore it
  */
 export function guessViews(cells) {
-  const order = ['front', 'right', 'top', 'back', 'left', 'bottom'];
+  const solved = solveBySize(cells);
+  if (solved) return solved;
 
-  if (cells.length === 3) {
-    const near = (a, b) => Math.abs(a - b) <= 1;
-    /** @type {number[][]} */
-    const solutions = [];
-    for (const [f, r, t] of TRIPLES) {
-      const F = cells[f], R = cells[r], T = cells[t];
-      if (near(F.h, R.h) && near(T.w, F.w) && near(T.h, R.w)) solutions.push([f, r, t]);
-    }
-    // Only trust it when the sizes leave no room for argument.
-    if (solutions.length === 1) {
-      const out = /** @type {Array<string|null>} */ ([null, null, null]);
-      const [f, r, t] = solutions[0];
-      out[f] = 'front';
-      out[r] = 'right';
-      out[t] = 'top';
-      return out;
+  const order = cells.length === 3
+    ? ['front', 'right', 'top']
+    : ['front', 'back', 'right', 'left', 'top', 'bottom'];
+  return cells.map((_, i) => order[i] ?? null);
+}
+
+/**
+ * The part of `guessViews` that is arithmetic rather than convention: names
+ * the cells when their sizes admit exactly one answer, null when they do not.
+ *
+ * Exported so the dialog can say which of the two it is showing. A guess from
+ * reading order that announces itself as an identification is the one way this
+ * screen can mislead.
+ *
+ * @param {Cell[]} cells
+ * @returns {Array<string | null> | null}
+ */
+export function solveBySize(cells) {
+  if (cells.length === 6) return solveSix(cells);
+  if (cells.length !== 3) return null;
+
+  const near = (a, b) => Math.abs(a - b) <= 1;
+  /** @type {number[][]} */
+  const solutions = [];
+  for (const [f, r, t] of TRIPLES) {
+    const F = cells[f], R = cells[r], T = cells[t];
+    if (near(F.h, R.h) && near(T.w, F.w) && near(T.h, R.w)) solutions.push([f, r, t]);
+  }
+  // Only trust it when the sizes leave no room for argument.
+  if (solutions.length !== 1) return null;
+  const out = /** @type {Array<string|null>} */ ([null, null, null]);
+  const [f, r, t] = solutions[0];
+  out[f] = 'front';
+  out[r] = 'right';
+  out[t] = 'top';
+  return out;
+}
+
+/**
+ * Name six cells from their sizes alone, or give up.
+ *
+ * Give up loudly rather than quietly: a cube projects six identical squares,
+ * every arrangement of them fits, and picking one would be a coin toss dressed
+ * up as arithmetic. Only an arrangement nothing else can match is returned.
+ *
+ * @param {Cell[]} cells
+ * @returns {Array<string | null> | null}
+ */
+function solveSix(cells) {
+  // A pixel of slack: a drawing may sit a pixel wider than its opposite when
+  // an edge column is a single anti-aliased pixel short of opaque.
+  const near = (a, b) => Math.abs(a - b) <= 1;
+  /** @type {Set<string>} */
+  const seen = new Set();
+  /** @type {Array<string|null> | null} */
+  let answer = null;
+
+  for (const pairing of PAIRINGS) {
+    if (!pairing.every(([i, j]) => near(cells[i].w, cells[j].w) && near(cells[i].h, cells[j].h))) continue;
+    // Which pair spans which axes: front/back is X×Y, right/left Z×Y, top/bottom X×Z.
+    for (const [a, b, c] of TRIPLES) {
+      const FB = cells[pairing[a][0]], RL = cells[pairing[b][0]], TB = cells[pairing[c][0]];
+      if (!near(FB.h, RL.h) || !near(TB.w, FB.w) || !near(TB.h, RL.w)) continue;
+      const out = /** @type {Array<string|null>} */ (new Array(6).fill(null));
+      [a, b, c].forEach((slot, role) => {
+        out[pairing[slot][0]] = PAIR_ROLES[role][0];
+        out[pairing[slot][1]] = PAIR_ROLES[role][1];
+      });
+      const key = out.join(',');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      answer = out;
+      if (seen.size > 1) return null;
     }
   }
-
-  return cells.map((_, i) => order[i] ?? null);
+  return answer;
 }
