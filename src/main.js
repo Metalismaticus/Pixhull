@@ -31,6 +31,8 @@ import {
 } from './edit/selection.js';
 import { paletteBands, paletteOrder } from './edit/palette-order.js';
 import { mergeOffer } from './edit/merge-offer.js';
+import { bakeOffer } from './edit/bake-offer.js';
+import { applyBake } from './core/bake.js';
 import { strokeSamples, strokeStepPx } from './edit/stroke.js';
 import { ViewStroke, blankSheet, paintAt, eraseAt, pickAt, fillAt } from './edit/draw2d.js';
 import { serializeVolume, deserializeVolume } from './core/serialize.js';
@@ -455,6 +457,7 @@ function dropBuild() {
   state.building = false;
   showBuildProgress(null);
   refreshMergeOffer();
+  invalidateBakeOffers();
   refreshSelectionPanel();
   refreshMapPanel();
 }
@@ -520,6 +523,7 @@ async function build() {
   // The merge button acts on the model the build is about to replace, so it goes
   // dark for the duration and says why.
   refreshMergeOffer();
+  invalidateBakeOffers();
   /** @type {import('./ui/build-task.js').BuildResult} */
   let built;
   try {
@@ -531,6 +535,7 @@ async function build() {
     state.building = false;
     showBuildProgress(null);
     refreshMergeOffer();
+    invalidateBakeOffers();
     refreshSelectionPanel();
     refreshMapPanel();
     status('status.buildFailed', { err: String(err instanceof Error ? err.message : err) }, 'error');
@@ -2017,6 +2022,7 @@ function applyUsage() {
   }
   updatePaletteFoot();
   refreshMergeOffer();
+  invalidateBakeOffers();
 }
 
 /**
@@ -2107,6 +2113,9 @@ function selectSwatch(i) {
     b.tabIndex = on ? 0 : -1;
   }
   updatePaletteFoot();
+  // An outline asked to use the selected colour costs something different for
+  // every slot, so the line under that button follows the selection.
+  if (/** @type {HTMLInputElement} */ ($('outline-use-color')).checked) invalidateBakeOffers();
 }
 
 /** @param {number} i */
@@ -2196,6 +2205,7 @@ function applyRecolour() {
   // so it is recomputed here rather than on the press. The undo/redo path gets
   // this through `refreshPalette()` already.
   refreshMergeOffer();
+  invalidateBakeOffers();
   state.dirty = true;
   refreshHistoryButtons();
   status('status.colorReplaced', { n: recolourSlot, hex: state.palette.hex(recolourSlot) });
@@ -2287,6 +2297,180 @@ function mergeColors() {
     faces: record.changed,
     free: state.palette.free.size,
   });
+}
+
+/**
+ * Budget for one bake count. Not the owner's number.
+ *
+ * A bake plan walks every exposed face, and a refresh takes two - one per
+ * operation. Nothing of the size people build finishes inside a budget worth
+ * having: on a 256 lorry (2 952 960 voxels, Node) a whole count is 282 ms for
+ * light and 400 / 463 / 621 ms for an outline of thickness 1 / 2 / 3. So the
+ * budget buys a usable floor instead of a freeze, and an unfinished count says
+ * out loud that it is a floor (`edit.bakePartial`, `edit.bakeOverflowPartial`).
+ * Applying has no budget at all - it happens once, on a press, and a number it
+ * did not finish would be a lie rather than a floor.
+ *
+ * 150 ms is now what 150 ms means: `walkBake` reads the clock on the walk, so
+ * both counts stop at 150 ms measured rather than at 369-636 ms. And the pair
+ * is bought only when the hand reaches for the section, never after a stroke -
+ * see `invalidateBakeOffers`.
+ */
+const BAKE_BUDGET_MS = 150;
+
+/** Same wait as the usage count, and for the same reason: never inside a stroke. */
+const BAKE_DELAY_MS = 300;
+let bakeTimer = 0;
+
+/** True while the two notes describe a model that has since changed. */
+let bakeStale = true;
+
+/**
+ * Say the counts are out of date, and do not pay for new ones.
+ *
+ * This is what the editing paths call, and it is the whole of the answer to a
+ * count that used to run after every stroke. Both plans walk the model, and on
+ * the 256 lorry (2 952 960 voxels, measured in Node) one walk costs 289 ms for
+ * light and 408 / 469 / 636 ms for an outline of thickness 1 / 2 / 3 - so a
+ * refresh of the pair cost up to 925 ms of frozen main thread, 300 ms after
+ * every stroke landed. Nobody asked for those numbers: they are read when the
+ * hand reaches for the buttons, which is what `countBakeOffers` is for.
+ *
+ * The answers that need no walk - no model, or a build in flight - are given
+ * at once instead: a button that stays lit after a build starts is a button
+ * that lies, and it costs nothing to be honest immediately.
+ */
+function invalidateBakeOffers() {
+  clearTimeout(bakeTimer);
+  if (state.building || !state.volume || state.palette.live === 0) {
+    refreshBakeOffers();
+    return;
+  }
+  bakeStale = true;
+  // The button stays live: a press has no budget and walks the whole model, and
+  // it answers out loud when there turns out to be nothing to do
+  // (`status.bakedNothing`). Dimming it here would be a guess.
+  for (const id of ['btn-bake-outline', 'btn-bake-light']) {
+    /** @type {HTMLButtonElement} */ ($(id)).disabled = false;
+  }
+  for (const id of ['bake-outline-note', 'bake-light-note']) {
+    const note = $(id);
+    note.textContent = t('edit.bakeStale');
+    // Not a warning: nothing is wrong, the number is simply not taken yet.
+    note.classList.remove('warn');
+  }
+}
+
+/** Take the counts now, if they are owed. Cheap when they are not. */
+function countBakeOffers() {
+  if (bakeStale) refreshBakeOffers();
+}
+
+/**
+ * A bake control changed under the hand, so the counts are owed again - but
+ * after the same 300 ms wait, because a slider sends one event per step.
+ */
+function scheduleBakeOffers() {
+  invalidateBakeOffers();
+  if (bakeStale) bakeTimer = setTimeout(countBakeOffers, BAKE_DELAY_MS);
+}
+
+/** Options the outline buttons act with, read from the two controls. */
+function outlineOptions() {
+  const thickness = +(/** @type {HTMLInputElement} */ ($('outline-thickness')).value) || 1;
+  const useColor = /** @type {HTMLInputElement} */ ($('outline-use-color')).checked;
+  return { op: /** @type {'outline'} */ ('outline'), thickness, index: useColor ? state.color : 0 };
+}
+
+/** Light or dim both bake buttons and say, under each, what it would cost. */
+function refreshBakeOffers() {
+  clearTimeout(bakeTimer);
+  bakeStale = false;
+  // Unlike the merge, the plan is not kept: the press walks the model again
+  // with the very same options, and nothing between the count and the click can
+  // change what that walk finds. Keeping a copy would only give it a way to go
+  // stale.
+  /** @type {Array<[string, string, import('./core/bake.js').BakeOptions]>} */
+  const pair = [
+    ['btn-bake-outline', 'bake-outline-note', outlineOptions()],
+    ['btn-bake-light', 'bake-light-note', { op: 'light' }],
+  ];
+  for (const [btnId, noteId, opts] of pair) {
+    const offer = bakeOffer({
+      palette: state.palette,
+      volume: state.volume,
+      building: state.building,
+      opts,
+      deadline: performance.now() + BAKE_BUDGET_MS,
+    });
+    /** @type {HTMLButtonElement} */ ($(btnId)).disabled = !offer.enabled;
+    const note = $(noteId);
+    note.textContent = offer.noteKey ? t(offer.noteKey, offer.noteParams) : '';
+    // A reason for something being off wears `.hint.warn`; a plain `.hint` is
+    // for a hint about something that works (`docs/DESIGN.md` §8).
+    note.classList.toggle('warn', offer.warn);
+  }
+}
+
+/**
+ * Write an outline, or the shading, into the face bytes of the model itself.
+ *
+ * The difference from the viewport's own shading is the whole point: this ends
+ * up in `.obj`, `.glb` and `.vox`, because those carry face bytes. It is also
+ * why it has to be one undo step - an operation that rewrites colour across the
+ * whole model and cannot be taken back is the defect the rebuild guard exists
+ * to end.
+ *
+ * @param {'outline'|'light'} op
+ */
+function bake(op) {
+  // The buttons are dark in both cases, so these are the keyboard and
+  // stale-state paths. They still answer out loud: silence on a press is what
+  // `docs/DESIGN.md` §7 calls the wrong column.
+  if (state.building) {
+    status('status.buildRunning', undefined, 'warn');
+    return;
+  }
+  if (!state.volume) {
+    status('status.noModel', undefined, 'warn');
+    return;
+  }
+  const opts = op === 'outline' ? outlineOptions() : { op: /** @type {'light'} */ ('light') };
+  const before = state.palette.snapshot();
+  const { record, colours, added } = applyBake(state.volume, state.palette, opts);
+  if (record.changed === 0) {
+    // Nothing was written, so nothing is pushed: an undo entry that undoes
+    // nothing is a Ctrl+Z that looks broken.
+    state.palette.restore(before);
+    status('status.bakedNothing', undefined, 'warn');
+    return;
+  }
+  state.history.pushBake(op, record, before, state.palette.snapshot());
+
+  uploadPalette();
+  // Every face instance carries its palette byte, so the buffer is stale.
+  state.geometryDirty = true;
+  refreshPalette();
+  scheduleUsage();
+  state.dirty = true;
+  refreshHistoryButtons();
+  status(op === 'outline' ? 'status.bakedOutline' : 'status.bakedLight', {
+    faces: record.changed,
+    colours,
+    added,
+    free: state.palette.free.size,
+  });
+
+  // Baked light and the viewport's own shading are the same tint, and leaving
+  // both on multiplies it twice - the model would look darker than the file it
+  // exports to. The checkbox goes off, and the status line says so rather than
+  // letting a control change under the user in silence.
+  const shadeBox = /** @type {HTMLInputElement} */ ($('shade-toggle'));
+  if (op === 'light' && shadeBox.checked) {
+    shadeBox.checked = false;
+    if (!state.mapOn) renderer.shade = 0;
+    status('status.bakeShadeOff');
+  }
 }
 
 function refreshHistoryButtons() {
@@ -2460,7 +2644,9 @@ function redo() {
  * them, so the texture, the panel and the face buffer all have to be redone.
  * A drawing is none of those: undoing a stroke on a picture leaves every voxel
  * where it was, and the model stays exactly as far behind as it was.
- * @param {'voxels'|'palette'|'merge'|'view'} kind
+ * A bake is a merge's twin here: it too rewrote face bytes and may have grown
+ * the palette, so both the texture and the face buffer are stale.
+ * @param {'voxels'|'palette'|'merge'|'bake'|'view'} kind
  */
 function afterHistoryStep(kind) {
   if (kind === 'view') {
@@ -2471,7 +2657,7 @@ function afterHistoryStep(kind) {
     refreshHistoryButtons();
     return;
   }
-  if (kind === 'palette' || kind === 'merge') {
+  if (kind === 'palette' || kind === 'merge' || kind === 'bake') {
     uploadPalette();
     // Undoing a merge brings a freed slot back; redoing one takes it away
     // again, and the selection must never sit on a hole.
@@ -3597,6 +3783,11 @@ function retranslate() {
   renderStatus();
   updateStats(state.lastStats, renderer.instanceCount);
   updateFramePreview();
+  // Both lines under the bake buttons carry numbers in words, so a language
+  // change has to write them again - in the new language, and without paying
+  // for a count that nobody has asked for yet.
+  if (bakeStale) invalidateBakeOffers();
+  else refreshBakeOffers();
 }
 
 function init() {
@@ -3765,6 +3956,27 @@ function init() {
   });
 
   $('btn-merge-colors').addEventListener('click', mergeColors);
+
+  $('btn-bake-outline').addEventListener('click', () => bake('outline'));
+  $('btn-bake-light').addEventListener('click', () => bake('light'));
+  $('outline-thickness').addEventListener('input', (e) => {
+    $('outline-thickness-label').textContent = /** @type {HTMLInputElement} */ (e.target).value;
+    // Thickness changes what the outline would cost, so the promise under the
+    // button is recomputed rather than left describing the previous setting.
+    scheduleBakeOffers();
+  });
+  $('outline-use-color').addEventListener('change', scheduleBakeOffers);
+
+  // Reaching for the section is what buys the counts. Pointer and keyboard both
+  // arrive here, and both arrive *before* the press: the heading spans the
+  // panel, so a pointer coming down the panel crosses it, and a Tab lands on
+  // the first control. `countBakeOffers` costs nothing when nothing changed.
+  for (const id of ['bake-heading', 'outline-thickness', 'outline-use-color',
+    'btn-bake-outline', 'bake-outline-note', 'btn-bake-light', 'bake-light-note']) {
+    const el = $(id);
+    el.addEventListener('pointerenter', countBakeOffers);
+    el.addEventListener('focus', countBakeOffers);
+  }
 
   $('btn-add-color').addEventListener('click', () => {
     const hex = /** @type {HTMLInputElement} */ ($('new-color')).value;
@@ -4022,6 +4234,9 @@ function init() {
   refreshToolControls();
   refreshMapPanel();
   refreshViewsAhead();
+  // Dark buttons with an empty line under them would say nothing about why;
+  // this writes the reason before the first model exists.
+  invalidateBakeOffers();
   // The grid's threshold is written under its checkbox from the first frame,
   // not only once a model has been built.
   updateZoomLabel();

@@ -15,6 +15,7 @@
  */
 
 import { imageToken, pasteRect } from './draw2d.js';
+import { writeBake } from '../core/bake.js';
 
 /**
  * @typedef {Object} VoxelState
@@ -75,9 +76,17 @@ function writeVoxel(vol, x, y, z, s) {
  * A merge is its own kind for a reason: it rewrites face bytes *and* the
  * palette, and it is many-to-one, so it cannot be undone by running the map
  * backwards. It carries the old face bytes and both palette states instead.
+ * A bake is its own kind for the same reason, and not the merge's: a merge is a
+ * 256-entry map that can be replayed forwards, while a bake gives a face a
+ * colour chosen from the face's own colour *and its direction*, so two faces
+ * wearing one slot walk away wearing two. Only a byte-by-byte record says where
+ * each one went, which is why this entry carries both sides.
  * @typedef {{kind: 'voxels', map: StrokeMap}
  *   | {kind: 'palette', index: number, before: number, after: number}
  *   | {kind: 'merge', remap: Uint8Array, record: FaceRecord,
+ *      before: PaletteState, after: PaletteState}
+ *   | {kind: 'bake', op: 'outline'|'light',
+ *      record: import('../core/bake.js').BakeRecord,
  *      before: PaletteState, after: PaletteState}
  *   | ViewEntry} Entry
  */
@@ -227,6 +236,25 @@ export class History {
   }
 
   /**
+   * Record a bake: the face bytes it rewrote and the palette on both sides.
+   *
+   * Never coalesced, exactly like a merge - the user who presses Ctrl+Z after
+   * baking light means the light, not the brush stroke before it.
+   *
+   * @param {'outline'|'light'} op
+   * @param {import('../core/bake.js').BakeRecord} record
+   * @param {PaletteState} before palette before the bake
+   * @param {PaletteState} after palette after it
+   */
+  pushBake(op, record, before, after) {
+    this.stack.length = this.cursor; // a new step drops the redo tail
+    this.stack.push({ kind: 'bake', op, record, before, after });
+    if (this.stack.length > this.limit) this.stack.shift();
+    this.cursor = this.stack.length;
+    this.paletteDrag = null;
+  }
+
+  /**
    * Record a finished stroke on a drawing, as `ViewStroke.finish()` built it.
    *
    * One entry per stroke, exactly like a stroke on the model: nobody wants to
@@ -307,13 +335,24 @@ export class History {
   /**
    * @param {import('../core/volume.js').Volume} vol
    * @param {import('../core/palette.js').Palette} [palette]
-   * @returns {'voxels'|'palette'|'merge'|'view'|null} what was undone, so the
-   *   caller knows whether geometry, only the palette texture, both, or a
+   * @returns {'voxels'|'palette'|'merge'|'bake'|'view'|null} what was undone, so
+   *   the caller knows whether geometry, only the palette texture, both, or a
    *   drawing have to be refreshed
    */
   undo(vol, palette) {
     if (!this.canUndo) return null;
     const entry = this.stack[this.cursor - 1];
+    if (entry.kind === 'bake') {
+      // Both halves or neither: the palette a bake grew holds the colours its
+      // face bytes name, so restoring one without the other leaves faces on a
+      // slot that means something else.
+      if (!palette || !vol) return null;
+      this.cursor--;
+      writeBake(vol, entry.record, 'before');
+      palette.restore(entry.before);
+      this.paletteDrag = null;
+      return 'bake';
+    }
     if (entry.kind === 'view') {
       if (!this.#writeView(entry, 'before')) return null;
       this.cursor--;
@@ -347,11 +386,19 @@ export class History {
   /**
    * @param {import('../core/volume.js').Volume} vol
    * @param {import('../core/palette.js').Palette} [palette]
-   * @returns {'voxels'|'palette'|'merge'|'view'|null}
+   * @returns {'voxels'|'palette'|'merge'|'bake'|'view'|null}
    */
   redo(vol, palette) {
     if (!this.canRedo) return null;
     const entry = this.stack[this.cursor];
+    if (entry.kind === 'bake') {
+      if (!palette || !vol) return null;
+      this.cursor++;
+      writeBake(vol, entry.record, 'after');
+      palette.restore(entry.after);
+      this.paletteDrag = null;
+      return 'bake';
+    }
     if (entry.kind === 'view') {
       if (!this.#writeView(entry, 'after')) return null;
       this.cursor++;
