@@ -25,8 +25,12 @@
  * @param {import('./volume.js').Volume} vol
  * @param {{min: number[], max: number[]}} box
  * @param {number} radius
+ * @param {(part: number) => void} [onStep] called between the four passes, with
+ *   how far through this field they are; a carve off the main thread reports it
+ * @returns {{releaseGradient: () => void, solid: (x: number, y: number, z: number) => boolean,
+ *   grad: (x: number, y: number, z: number) => number[] | null}}
  */
-export function densityField(vol, box, radius) {
+export function densityField(vol, box, radius, onStep) {
   const pad = radius + 2;
   const ox = box.min[0] - pad;
   const oy = box.min[1] - pad;
@@ -63,9 +67,13 @@ export function densityField(vol, box, radius) {
       if (add < count) sum += line[add];
     }
   };
+  onStep?.(0.25);
   for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) blur(at(0, j, k), 1, nx);
+  onStep?.(0.5);
   for (let k = 0; k < nz; k++) for (let i = 0; i < nx; i++) blur(at(i, 0, k), nx, ny);
+  onStep?.(0.75);
   for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) blur(at(i, j, 0), nx * ny, nz);
+  onStep?.(1);
 
   return {
     /**

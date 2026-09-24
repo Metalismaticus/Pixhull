@@ -44,6 +44,69 @@ const MIRROR_AXIS = {
 };
 
 /**
+ * How much of the wall clock each stage takes, so a bar filling up moves at a
+ * believable speed instead of jumping.
+ *
+ * Measured on this bench at 512 (`tests/perf/carve.mjs` fixture, Node 22,
+ * 2026-09-24): intersect 2.1 s, field 1.0 s, paint 1.4 s, slopes 1.0 s, infer
+ * 2.9 s, sampling and rastering together under 0.1 s - though on real art the
+ * sampling stage also pays for quantising the palette, so it is given a little
+ * more than the synthetic figure. The shares hold well enough at 256; being a
+ * few per cent out only makes the bar uneven, never wrong.
+ */
+const STAGE_WEIGHT = [
+  ['sample', 0.05],
+  ['intersect', 0.25],
+  ['field', 0.12],
+  ['paint', 0.17],
+  ['slopes', 0.12],
+  ['infer', 0.29],
+];
+
+/**
+ * Turns "stage three is 40% done" into one rising number in 0..1.
+ *
+ * Every caller of `onProgress` is inside a loop that runs millions of times, so
+ * the no-callback case has to cost nothing: without a callback this hands back
+ * an object whose methods are empty.
+ *
+ * @param {((fraction: number, stage: string) => void) | undefined} onProgress
+ */
+function progressReporter(onProgress) {
+  if (!onProgress) return { begin() {}, at() {}, done() {} };
+  let base = 0;
+  let weight = 1;
+  let stage = 'sample';
+  // A bar that goes backwards reads as a bug in the build. The inference stage
+  // can genuinely revise its own estimate downwards - its queue grows while it
+  // is being walked - so the number is held at its high-water mark instead.
+  let high = 0;
+  return {
+    /** @param {string} name one of STAGE_WEIGHT's names */
+    begin(name) {
+      base = 0;
+      for (const [n, w] of STAGE_WEIGHT) {
+        if (n === name) { weight = w; break; }
+        base += w;
+      }
+      stage = name;
+      if (base > high) high = base;
+      onProgress(high, stage);
+    },
+    /** @param {number} part 0..1 through the current stage */
+    at(part) {
+      const f = base + weight * (part < 0 ? 0 : part > 1 ? 1 : part);
+      if (f > high) high = f;
+      onProgress(high, stage);
+    },
+    done() {
+      high = 1;
+      onProgress(1, stage);
+    },
+  };
+}
+
+/**
  * @typedef {Object} CarveStats
  * @property {number} solid voxels in the finished model
  * @property {number} painted faces coloured directly from a source view
@@ -59,12 +122,17 @@ const MIRROR_AXIS = {
  * @param {import('./views.js').SourceView[]} views
  * @param {number} N grid size
  * @param {import('./palette.js').Palette} palette
- * @param {{mirrorMissing?: boolean}} [opts]
+ * @param {{mirrorMissing?: boolean, slopeColour?: boolean,
+ *   onProgress?: (fraction: number, stage: string) => void}} [opts] `onProgress`
+ *   is called with a number rising from 0 to 1 and the name of the stage
+ *   running; it is how a build off the main thread can show how far it has got.
  * @returns {{volume: Volume, stats: CarveStats}}
  */
 export function carve(views, N, palette, opts = {}) {
   const t0 = performance.now();
   const N1 = N - 1;
+  const report = progressReporter(opts.onProgress);
+  report.begin('sample');
 
   // Sample every view before choosing a single colour, then seed the palette
   // with the colours that actually cover the most area.
@@ -80,8 +148,10 @@ export function carve(views, N, palette, opts = {}) {
     if (!v.enabled || v.trim.w === 0) continue;
     sampled[v.name] = v.sampleCells(N);
     active.push(v.name);
+    report.at((active.length / (views.length + 1)) * 0.5);
   }
   seedPalette(sampled, palette);
+  report.at(0.75);
 
   /** @type {Record<string, {mask: Uint8Array, color: Uint8Array}>} */
   const raster = {};
@@ -114,7 +184,12 @@ export function carve(views, N, palette, opts = {}) {
 
   // The side views are constant along x, so a failed side test kills an entire
   // row before the inner loop ever runs.
+  report.begin('intersect');
   for (let z = 0; z < N; z++) {
+    // Every 16 slices, not every slice: at 512 that is 32 reports for two
+    // seconds of work, which is a bar that moves without a callback in the way,
+    // and at 64 it is still four.
+    if ((z & 15) === 0) report.at(z / N);
     const rowTop = mTop ? z * N : 0;
     const rowBottom = mBottom ? (N1 - z) * N : 0;
     for (let y = 0; y < N; y++) {
@@ -150,13 +225,18 @@ export function carve(views, N, palette, opts = {}) {
   // One blurred copy of the model serves both passes below: the repaint reads
   // surface directions off it, and the inference reads its occupancy instead of
   // asking the chunked store about every neighbour of every voxel.
+  report.begin('field');
   const box = vol.bounds();
-  const field = box ? densityField(vol, box, 2) : null;
+  const field = box ? densityField(vol, box, 2, (part) => report.at(part)) : null;
 
-  const { painted, dominant, seen } = paintFromViews(vol, raster, N);
-  if (field && opts.slopeColour !== false) repaintSlopes(vol, raster, N, seen, field, box);
+  report.begin('paint');
+  const { painted, dominant, seen } = paintFromViews(vol, raster, N, report);
+  report.begin('slopes');
+  if (field && opts.slopeColour !== false) repaintSlopes(vol, raster, N, seen, field, box, report);
   field?.releaseGradient();
-  const inferred = inferMissingFaces(vol, dominant, field);
+  report.begin('infer');
+  const inferred = inferMissingFaces(vol, dominant, field, report);
+  report.done();
 
   return {
     volume: vol,
@@ -250,7 +330,7 @@ function mirrorRaster(src, N, axis) {
  * @param {Record<string, {mask: Uint8Array, color: Uint8Array}>} raster
  * @param {number} N
  */
-function repaintSlopes(vol, raster, N, seen, field, box) {
+function repaintSlopes(vol, raster, N, seen, field, box, report = { at() {} }) {
   /** face index -> the view that stares down it */
   const facing = {};
   for (const name of Object.keys(raster)) facing[VIEW_GEOM[name].face] = name;
@@ -259,7 +339,9 @@ function repaintSlopes(vol, raster, N, seen, field, box) {
   // the occupancy; asking it saves a second pass over three million voxels.
   const at = (x, y, z) => field.solid(x, y, z);
 
+  const zSpan = box.max[2] - box.min[2] + 1;
   for (let z = box.min[2]; z <= box.max[2]; z++) {
+    if ((z & 15) === 0) report.at((z - box.min[2]) / zSpan);
     for (let y = box.min[1]; y <= box.max[1]; y++) {
       for (let x = box.min[0]; x <= box.max[0]; x++) {
         if (!at(x, y, z)) continue;
@@ -315,12 +397,15 @@ function repaintSlopes(vol, raster, N, seen, field, box) {
  * @returns {{painted: number, dominant: number}} dominant is the most-used
  *   palette index, used as the last-resort fill so no face can stay blank
  */
-function paintFromViews(vol, raster, N) {
+function paintFromViews(vol, raster, N, report = { at() {} }) {
   let painted = 0;
   const histogram = new Uint32Array(256);
   /** view name -> how far along each ray the first voxel sat, or -1 */
   const seen = {};
-  for (const name of Object.keys(raster)) {
+  const names = Object.keys(raster);
+  let done = 0;
+  for (const name of names) {
+    report.at(done++ / names.length);
     const geom = VIEW_GEOM[name];
     const { mask, color } = raster[name];
     const depth = new Int32Array(N * N).fill(-1);
@@ -385,7 +470,7 @@ function depthAlong(face, x, y, z, N) {
  * @param {number} fallback palette index used when nothing can be borrowed
  * @returns {number} faces filled in this way
  */
-function inferMissingFaces(vol, fallback = 1, field = null) {
+function inferMissingFaces(vol, fallback = 1, field = null, report = { at() {} }) {
   const nx = vol.nx;
   const ny = vol.ny;
   const index = (x, y, z) => x + nx * (y + ny * z);
@@ -399,7 +484,13 @@ function inferMissingFaces(vol, fallback = 1, field = null) {
   /** @type {Map<number, number>} surface voxel -> representative colour, 0 = still unknown */
   const own = new Map();
 
+  // Three passes over the model's skin, each about a third of the stage: find
+  // the surface, spread colour outwards from what a view reached, write the
+  // borrowed colours back.
+  let walked = 0;
+  const total = Math.max(1, vol.solidCount);
   vol.forEachSolid((x, y, z) => {
+    if ((++walked & 0xffff) === 0) report.at((walked / total) / 3);
     let exposed = false;
     let seen = 0;
     for (let d = 0; d < 6; d++) {
@@ -423,7 +514,9 @@ function inferMissingFaces(vol, fallback = 1, field = null) {
   const queue = [];
   for (const [i, c] of own) if (c !== 0) queue.push(i);
 
+  report.at(1 / 3);
   for (let head = 0; head < queue.length; head++) {
+    if ((head & 0xffff) === 0) report.at(1 / 3 + (head / Math.max(1, queue.length)) / 3);
     const i = queue[head];
     const c = /** @type {number} */ (own.get(i));
     const x = i % nx;
@@ -442,7 +535,10 @@ function inferMissingFaces(vol, fallback = 1, field = null) {
   }
 
   let inferred = 0;
+  let written = 0;
+  report.at(2 / 3);
   vol.forEachSolid((x, y, z) => {
+    if ((++written & 0xffff) === 0) report.at(2 / 3 + (written / total) / 3);
     const i = index(x, y, z);
     if (!own.has(i)) return;
     const c = own.get(i) || fallback;

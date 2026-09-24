@@ -210,11 +210,15 @@ export class Renderer {
 
   /**
    * @param {import('../core/volume.js').Volume} volume
+   * @param {{buffer: ArrayBuffer, count: number}} [prebuilt] instances built
+   *   elsewhere - the build worker packs them while it still has the volume in
+   *   hand, which spares the main thread a walk over every solid voxel (two
+   *   seconds at 512). Omitted, the volume is walked here as before.
    * @returns {number} exposed face count
    */
-  setVolume(volume) {
+  setVolume(volume, prebuilt) {
     const gl = this.gl;
-    const { buffer, count } = volume.buildFaceInstances();
+    const { buffer, count } = prebuilt ?? volume.buildFaceInstances();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, buffer, gl.DYNAMIC_DRAW);
     this.instanceCount = count;

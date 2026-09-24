@@ -200,6 +200,41 @@ export class Palette {
     return out;
   }
 
+  /**
+   * The whole palette, aliases included, as plain data for `postMessage`.
+   *
+   * Deliberately not `serialize()`: that one keeps only the colours, because a
+   * saved project reopens against its own art. A palette coming back from a
+   * carve has to arrive complete - the lookup holds every source colour a
+   * quantised import aliased onto a slot, and losing it would send the
+   * eyedropper and the next `add()` through a nearest-colour search that can
+   * answer differently from the carve that just ran.
+   *
+   * @returns {{colors: number[], aliases: Int32Array, overflowed: boolean}}
+   */
+  snapshot() {
+    const aliases = new Int32Array(this.lookup.size * 2);
+    let i = 0;
+    for (const [key, index] of this.lookup) {
+      aliases[i++] = key;
+      aliases[i++] = index;
+    }
+    return { colors: this.colors.slice(), aliases, overflowed: this.overflowed };
+  }
+
+  /**
+   * @param {{colors: number[], aliases: Int32Array, overflowed: boolean}} s
+   * @returns {Palette}
+   */
+  static fromSnapshot(s) {
+    const p = new Palette();
+    p.colors = s.colors.slice();
+    p.lookup = new Map();
+    for (let i = 0; i < s.aliases.length; i += 2) p.lookup.set(s.aliases[i], s.aliases[i + 1]);
+    p.overflowed = s.overflowed;
+    return p;
+  }
+
   /** @returns {{colors: number[]}} */
   serialize() {
     return { colors: this.colors.slice() };

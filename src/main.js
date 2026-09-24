@@ -6,7 +6,7 @@
 import { Palette, PALETTE_MAX } from './core/palette.js';
 import { SourceView, VIEW_NAMES, suggestGridSize, fitViews } from './core/views.js';
 import { decodeImage, toImageData } from './ui/decode.js';
-import { carve } from './core/carve.js';
+import { startBuild, cancelBuild } from './ui/build-task.js';
 import { detectCells, cropCell, guessViews } from './core/sheet.js';
 import { Renderer } from './gfx/renderer.js';
 import { OrthoCamera, PITCH_PRESETS, directionYaws, DEG } from './gfx/camera.js';
@@ -59,6 +59,13 @@ const state = {
   pendingSlot: null,
   /** the viewport needs redrawing */
   dirty: true,
+  /**
+   * A build is running somewhere else and the model on screen is the previous
+   * one. Editing has to be refused while it is set: the build ends by replacing
+   * the volume and clearing the history, so an edit made now would vanish
+   * without a word - the very thing the rebuild guard exists to prevent.
+   */
+  building: false,
   /** the instance buffer is stale; coalesced to one rebuild per frame */
   geometryDirty: false,
 
@@ -324,9 +331,65 @@ function guardRebuild(proceed, revert) {
 
 // ------------------------------------------------------------------ build
 
-function build() {
+/**
+ * Show how far the build has got, or hide the bar with `null`.
+ *
+ * The bar carries the fraction and the status line carries the words, because
+ * the two answer different questions - "will this finish?" and "what is it
+ * doing?" - and the status line is the one place this app says what is
+ * happening (`docs/DESIGN.md`, §6).
+ *
+ * @param {number|null} fraction 0..1, or null when no build is running
+ * @param {string} [stage] name of the stage, as `carve.js` reports it
+ */
+function showBuildProgress(fraction, stage = 'sample') {
+  const host = $('build-progress');
+  if (fraction === null) {
+    host.classList.add('hidden');
+    return;
+  }
+  const pct = Math.round(fraction * 100);
+  host.classList.remove('hidden');
+  host.setAttribute('aria-valuenow', String(pct));
+  /** @type {HTMLElement} */ ($('build-progress-fill')).style.width = pct + '%';
+  status('status.building', { pct, stage: ['build.' + stage] });
+}
+
+/**
+ * Take the build in flight off the screen and out of the future.
+ *
+ * Anything that puts a different model up has to call this first. A build that
+ * is still running owns `state.volume`, `state.palette` and the history the
+ * moment it finishes (`build()`, after the await), so a model that arrived from
+ * somewhere else - a loaded project, a cleared scene - would be silently
+ * replaced by an answer to a question the user has since withdrawn. Cancelling
+ * makes that promise reject as `cancelled`, and `build()` returns without
+ * touching anything.
+ */
+function dropBuild() {
+  cancelBuild();
+  state.building = false;
+  showBuildProgress(null);
+}
+
+/**
+ * Build the model, off the main thread.
+ *
+ * Nothing awaits this - callers fire it and carry on, exactly as they did when
+ * it was synchronous. What changed is that the tab now stays alive for the
+ * eleven seconds a 512 grid takes: the carve, the face instances and the
+ * bounding box all happen in a worker (`src/ui/build-task.js`), and this
+ * function only waits for the answer and puts it on screen.
+ *
+ * The model already on screen stays there while the new one is being built.
+ * Blanking it would be honest about the state and useless in practice - the
+ * artist has nothing to look at and no way to tell a slow build from a broken
+ * one, whereas the old model plus a progress bar says both.
+ */
+async function build() {
   const views = [...state.views.values()];
   if (views.length === 0) {
+    dropBuild();
     state.volume = null;
     state.lastStats = null;
     renderer.instanceCount = 0;
@@ -338,16 +401,37 @@ function build() {
   }
 
   const N = state.gridSize;
-  state.palette = new Palette();
   // Art larger than the grid is reduced, not cropped, and the views are
-  // reconciled against each other before it happens.
+  // reconciled against each other before it happens. Cheap enough to stay here
+  // (11 ms at 512), and the panel needs its answer either way.
   const fit = fitViews(views, N);
   state.fitScale = fit.reduction;
   state.worstFit = fit.worst;
   state.trimmed = fit.trimmed ?? [];
 
   const mirrorMissing = /** @type {HTMLInputElement} */ ($('mirror-toggle')).checked;
-  const { volume, stats } = carve(views, N, state.palette, { mirrorMissing });
+  const job = { views: views.map((v) => v.snapshot()), N, mirrorMissing };
+
+  state.building = true;
+  showBuildProgress(0, 'sample');
+  /** @type {import('./ui/build-task.js').BuildResult} */
+  let built;
+  try {
+    built = await startBuild(job, (fraction, stage) => showBuildProgress(fraction, stage));
+  } catch (err) {
+    // A build the user replaced with another one says nothing: the newer build
+    // owns the progress bar and the status line now.
+    if (err instanceof Error && /** @type {any} */ (err).cancelled) return;
+    state.building = false;
+    showBuildProgress(null);
+    status('status.buildFailed', { err: String(err instanceof Error ? err.message : err) }, 'error');
+    return;
+  }
+  state.building = false;
+  showBuildProgress(null);
+
+  const { volume, stats } = built;
+  state.palette = built.palette;
   state.volume = volume;
   state.lastStats = stats;
 
@@ -357,13 +441,13 @@ function build() {
   refreshPalette();
   scheduleUsage();
   clearHover();
-  const faces = renderer.setVolume(volume);
+  const faces = renderer.setVolume(volume, built.faces);
 
-  const box = volume.bounds();
+  const box = built.box;
   if (box) camera.fit(box, canvas.width || 800, canvas.height || 600);
 
   $('viewport-empty').classList.toggle('hidden', volume.solidCount > 0);
-  updateStats(stats, faces);
+  updateStats(stats, faces, box);
   updateZoomLabel();
   updateFramePreview();
   // The solvers turn and mirror views inside the carve, so the slots have to be
@@ -414,8 +498,11 @@ function build() {
 /**
  * @param {import('./core/carve.js').CarveStats | null} stats
  * @param {number} faces
+ * @param {{min: number[], max: number[]}|null} [bounds] the box, when the caller
+ *   already has it. Walking for it costs a fifth of a second at 512, and a
+ *   fresh build is handed the box by the worker that carved it.
  */
-function updateStats(stats, faces) {
+function updateStats(stats, faces, bounds) {
   const el = $('stats');
   el.textContent = '';
   if (!stats || !state.volume) {
@@ -425,7 +512,7 @@ function updateStats(stats, faces) {
     return;
   }
 
-  const b = state.volume.bounds();
+  const b = bounds ?? state.volume.bounds();
   const size = b
     ? (b.max[0] - b.min[0] + 1) + '×' + (b.max[1] - b.min[1] + 1) + '×' + (b.max[2] - b.min[2] + 1)
     : '—';
@@ -902,6 +989,9 @@ let recolourBefore = 0;
 
 /** @param {number} i */
 function openRecolour(i) {
+  // Same reason as the drawing tools: the build that is running will replace
+  // this palette wholesale when it lands.
+  if (state.building) return;
   const input = /** @type {HTMLInputElement} */ ($('edit-color'));
   state.history.endPalette();
   recolourSlot = i;
@@ -991,7 +1081,9 @@ function hitAtPoint(sx, sy) {
  * @returns {boolean} true when the model was touched
  */
 function runToolAtPoint(sx, sy) {
-  if (!state.volume || state.tool === 'orbit') return false;
+  // A build in flight ends by replacing the volume and clearing the history, so
+  // anything drawn now would be thrown away without a word.
+  if (!state.volume || state.building || state.tool === 'orbit') return false;
   const hit = hitAtPoint(sx, sy);
   if (!hit) return false;
 
@@ -1065,6 +1157,13 @@ let strokeCapped = false;
  */
 function reportStroke() {
   if (state.tool === 'orbit' || state.tool === 'pick') return;
+  // Editing is refused while a build is running, and saying "nothing changed -
+  // the face is already that colour" would be a lie about why.
+  if (state.building) {
+    hoverLine = null;
+    status('status.editBlocked', undefined, 'warn');
+    return;
+  }
   // The report has to win over the hover line, or the cursor sitting where it
   // just painted would hide the answer.
   hoverLine = null;
@@ -1081,7 +1180,7 @@ function reportStroke() {
 }
 
 function undo() {
-  const kind = state.volume ? state.history.undo(state.volume, state.palette) : null;
+  const kind = state.volume && !state.building ? state.history.undo(state.volume, state.palette) : null;
   if (!kind) {
     status('status.nothingToUndo');
     return;
@@ -1091,7 +1190,7 @@ function undo() {
 }
 
 function redo() {
-  const kind = state.volume ? state.history.redo(state.volume, state.palette) : null;
+  const kind = state.volume && !state.building ? state.history.redo(state.volume, state.palette) : null;
   if (!kind) return;
   afterHistoryStep(kind);
   status('status.redone');
@@ -1197,7 +1296,7 @@ function commitBoxDrag() {
   boxDrag = null;
   renderer.clearPreview();
   state.dirty = true;
-  if (!drag || !state.volume) return;
+  if (!drag || !state.volume || state.building) return;
 
   state.history.begin();
   const changed = applyBox(state.volume, drag.extent, {
@@ -1787,6 +1886,11 @@ async function loadProject(file) {
 
     if (data.volume && data.palette) {
       // Restore the saved voxels rather than re-carving, so hand edits survive.
+      // A build may still be running - the tab answers during one now, so the
+      // Load button is reachable mid-build - and it would land on top of the
+      // file the user just opened, history and all. The file wins: the user
+      // asked for it, and asked for it after refusing to lose the edits.
+      dropBuild();
       state.palette = Palette.deserialize(data.palette);
       state.volume = deserializeVolume(data.volume);
       state.lastStats = { solid: state.volume.solidCount, painted: 0, inferred: 0, mirrored: [], ms: 0 };

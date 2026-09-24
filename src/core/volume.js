@@ -77,6 +77,83 @@ export class Volume {
     return new Volume(n, n, n);
   }
 
+  /**
+   * Flatten to plain arrays that can cross a worker boundary.
+   *
+   * A `Volume` cannot be posted as it is: structured cloning drops the `Chunk`
+   * prototype, and posting one buffer per chunk would mean thousands of
+   * transfers on a large model. So the chunks are concatenated into four flat
+   * arrays whose buffers travel as transferables - no copy on the way out, one
+   * copy back into chunks on the way in.
+   *
+   * Interior chunks that were never painted stay unpainted here too: `faceOf`
+   * is -1 for them and they contribute nothing to `faces`. On a 512 lorry that
+   * is 52 MB moved instead of 250.
+   *
+   * Every face byte is carried verbatim. That is not an optimisation but the
+   * contract: a face byte is the model's meaning, so a transfer that rounded,
+   * renumbered or dropped one would be a silent corruption. `tests/carve/
+   * volume-transfer.mjs` compares byte for byte.
+   *
+   * @returns {{nx: number, ny: number, nz: number, solidCount: number,
+   *   ids: Int32Array, counts: Uint32Array, solid: Uint32Array,
+   *   faceOf: Int32Array, faces: Uint8Array}}
+   */
+  pack() {
+    const n = this.chunks.size;
+    const ids = new Int32Array(n);
+    const counts = new Uint32Array(n);
+    const solid = new Uint32Array(n * CHUNK_WORDS);
+    const faceOf = new Int32Array(n).fill(-1);
+    let painted = 0;
+    for (const c of this.chunks.values()) if (c.faces) painted++;
+    const faces = new Uint8Array(painted * CHUNK_VOX * 6);
+
+    let i = 0;
+    let f = 0;
+    for (const [id, c] of this.chunks) {
+      ids[i] = id;
+      counts[i] = c.count;
+      solid.set(c.solid, i * CHUNK_WORDS);
+      if (c.faces) {
+        faces.set(c.faces, f * CHUNK_VOX * 6);
+        faceOf[i] = f;
+        f++;
+      }
+      i++;
+    }
+    return { nx: this.nx, ny: this.ny, nz: this.nz, solidCount: this.solidCount, ids, counts, solid, faceOf, faces };
+  }
+
+  /** The buffers of a packed volume, in the form `postMessage` wants. */
+  static transferables(packed) {
+    return [packed.ids.buffer, packed.counts.buffer, packed.solid.buffer, packed.faceOf.buffer, packed.faces.buffer];
+  }
+
+  /**
+   * Rebuild a volume from `pack()`.
+   *
+   * The dirty set is left empty on purpose: whoever unpacks has the geometry
+   * that came with it, and marking every chunk dirty would ask the renderer to
+   * rebuild the buffer it was just handed.
+   *
+   * @param {ReturnType<Volume['pack']>} p
+   * @returns {Volume}
+   */
+  static unpack(p) {
+    const vol = new Volume(p.nx, p.ny, p.nz);
+    for (let i = 0; i < p.ids.length; i++) {
+      const c = new Chunk();
+      c.count = p.counts[i];
+      c.solid.set(p.solid.subarray(i * CHUNK_WORDS, (i + 1) * CHUNK_WORDS));
+      const f = p.faceOf[i];
+      if (f >= 0) c.paint().set(p.faces.subarray(f * CHUNK_VOX * 6, (f + 1) * CHUNK_VOX * 6));
+      vol.chunks.set(p.ids[i], c);
+    }
+    vol.solidCount = p.solidCount;
+    return vol;
+  }
+
   inBounds(x, y, z) {
     return x >= 0 && y >= 0 && z >= 0 && x < this.nx && y < this.ny && z < this.nz;
   }

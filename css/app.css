@@ -396,6 +396,32 @@ button.linkish {
 .viewport-empty .hint { pointer-events: auto; }
 .viewport-empty.hidden { display: none; }
 
+/*
+ * How far the build has got. Two pixels immediately above the status line,
+ * which carries the same number in words: the bar is for "is this moving", the
+ * line for "what is it doing". Nothing else on screen moves during a build, so
+ * a thicker bar would be shouting.
+ */
+.progress {
+  position: absolute;
+  left: 0; right: 0; bottom: 22px;
+  height: 2px;
+  background: var(--line-soft);
+  pointer-events: none;
+}
+.progress.hidden { display: none; }
+
+.progress-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  /* The worker sends a step as soon as the fraction moves 1%, and at least once
+     every 60 ms even when it has not - so steps can arrive far faster than this
+     easing, and 60 ms is only the longest gap. Easing reads as motion rather
+     than as a bar that twitches. */
+  transition: width 120ms linear;
+}
+
 .statusbar {
   position: absolute;
   left: 0; right: 0; bottom: 0;

@@ -41,6 +41,25 @@ export const VIEW_GEOM = {
 /** Alpha at or above this counts as solid. */
 export const ALPHA_THRESHOLD = 128;
 
+/**
+ * A `SourceView` reduced to plain data, so the carve can run somewhere else.
+ *
+ * @typedef {Object} ViewSnapshot
+ * @property {string} name
+ * @property {{width: number, height: number, data: Uint8ClampedArray|Uint8Array}} image
+ * @property {boolean} enabled
+ * @property {boolean} flipH
+ * @property {boolean} flipV
+ * @property {number} rotate
+ * @property {boolean} orientLocked
+ * @property {number} scaleX
+ * @property {number} scaleY
+ * @property {number} offsetX
+ * @property {number} offsetY
+ * @property {Uint8Array|null} clip
+ * @property {{x: number, y: number, w: number, h: number}} trim
+ */
+
 export class SourceView {
   /**
    * @param {string} name one of VIEW_NAMES
@@ -81,6 +100,56 @@ export class SourceView {
     /** Set by autoPlace; kept so the UI can show "trimmed to 37x52". */
     this.trim = { x: 0, y: 0, w: image.width, h: image.height };
     this.computeTrim();
+  }
+
+  /**
+   * Everything the carve reads, as plain data that survives `postMessage`.
+   *
+   * Taken *after* the solvers have run: rotation, scale, offset and clip are
+   * their output, and a worker that re-derived them could reach a different
+   * answer from the one the panel is showing.
+   *
+   * @returns {ViewSnapshot}
+   */
+  snapshot() {
+    return {
+      name: this.name,
+      image: { width: this.image.width, height: this.image.height, data: this.image.data },
+      enabled: this.enabled,
+      flipH: this.flipH,
+      flipV: this.flipV,
+      rotate: this.rotate,
+      orientLocked: this.orientLocked,
+      scaleX: this.scaleX,
+      scaleY: this.scaleY,
+      offsetX: this.offsetX,
+      offsetY: this.offsetY,
+      clip: this.clip,
+      trim: { ...this.trim },
+    };
+  }
+
+  /**
+   * The other half of `snapshot()`.
+   * @param {ViewSnapshot} s
+   * @returns {SourceView}
+   */
+  static fromSnapshot(s) {
+    const v = new SourceView(s.name, s.image);
+    v.enabled = s.enabled;
+    v.flipH = s.flipH;
+    v.flipV = s.flipV;
+    v.rotate = s.rotate;
+    v.orientLocked = s.orientLocked;
+    v.scaleX = s.scaleX;
+    v.scaleY = s.scaleY;
+    v.offsetX = s.offsetX;
+    v.offsetY = s.offsetY;
+    v.clip = s.clip;
+    // Last, and not from the constructor's own scan: the trim on the snapshot is
+    // what the placement was computed against.
+    v.trim = { ...s.trim };
+    return v;
   }
 
   /** Tight bounding box of non-transparent pixels. */
