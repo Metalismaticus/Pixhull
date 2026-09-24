@@ -107,16 +107,93 @@ export function quantize(counts, max) {
       slots--;
     }
     const colors = [...heavy, ...[...rest].sort((a, b) => b[1] - a[1]).map(([k]) => k)];
-    const assign = new Map();
-    colors.forEach((k, i) => assign.set(k, i));
-    for (const [k, slot] of alias) assign.set(k, slot);
-    return { colors, assign, reserved: heavy.length };
+    return { colors, assign: assignNearest(counts, colors), reserved: heavy.length };
   }
   const cut = medianCut(rest, slots);
   const colors = [...heavy, ...cut.colors];
-  const assign = new Map(alias);
-  for (const [k, slot] of cut.assign) assign.set(k, heavy.length + slot);
-  return { colors, assign, reserved: heavy.length };
+  return { colors, assign: assignNearest(counts, colors), reserved: heavy.length };
+}
+
+/**
+ * How far apart the CIEDE2000 lightness term can stretch a lightness
+ * difference: `dE00 >= |dL| / SL`, and `SL = 1 + 0.015(L-50)^2/sqrt(20+(L-50)^2)`
+ * is largest at the ends of the scale, where it is 1.7475. So a palette colour
+ * whose L is further than `SL_MAX * best` away cannot beat `best`, whatever its
+ * hue - which is what makes the search below exact rather than a shortlist.
+ */
+const SL_MAX = 1.7475;
+
+/**
+ * Send every source colour to the palette colour nearest it.
+ *
+ * Which is not what the cut does on its own: `medianCut` hands a colour to the
+ * box it was sorted into and the box speaks with its heaviest member's voice,
+ * so a colour sitting at the edge of its box can be far from that voice while
+ * another box's colour is right beside it. On the owner's lorry (2026-09-24,
+ * grid 256, 17352 art colours) that was 47.6% of painted cells going somewhere
+ * other than the nearest slot: mean error ΔE 0.877 against 0.602, and 177 cells
+ * visibly wrong (ΔE > 10) where the nearest slot leaves 26. It is the same
+ * mistake on flat art, only smaller - `tests/palette/nearest-slot.mjs` measures
+ * it on the synthetic livery, where it is 45 colours of 324.
+ *
+ * The reservation is unaffected: a reserved colour is in `colors` exactly as
+ * drawn, so its nearest is itself at ΔE 0 and it still lands byte for byte.
+ *
+ * Exact, not approximate: the colours are walked outwards in lightness from the
+ * source colour's own L and the walk stops where the bound above says nothing
+ * closer can be left. Measured against a full 255-way CIEDE2000 scan on the
+ * lorry: the same answer for all 17352 colours, 87 ms against 991 ms, 14.7
+ * distance calculations per colour rather than 255.
+ *
+ * @param {Map<number, number>} counts every source colour
+ * @param {number[]} colors the palette, packed 0xRRGGBB
+ * @returns {Map<number, number>} source colour -> index into `colors`
+ */
+function assignNearest(counts, colors) {
+  const n = colors.length;
+  if (n === 0) return new Map();
+  const L = new Float64Array(n);
+  const A = new Float64Array(n);
+  const B = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const [l, a, b] = packedToLab(colors[i]);
+    L[i] = l; A[i] = a; B[i] = b;
+  }
+  // Slot indices in order of lightness, so the walk below is a walk along one
+  // array rather than a sort per colour.
+  const order = new Int32Array(n);
+  for (let i = 0; i < n; i++) order[i] = i;
+  const byL = Array.from(order).sort((p, q) => L[p] - L[q]);
+  order.set(byL);
+  const sortedL = new Float64Array(n);
+  for (let i = 0; i < n; i++) sortedL[i] = L[order[i]];
+
+  /** @type {Map<number, number>} */
+  const assign = new Map();
+  for (const key of counts.keys()) {
+    const [l, a, b] = packedToLab(key);
+    let lo = 0;
+    let hi = n;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (sortedL[mid] < l) lo = mid + 1; else hi = mid;
+    }
+    let up = lo;
+    let down = lo - 1;
+    let best = Infinity;
+    let pick = order[Math.min(lo, n - 1)];
+    for (;;) {
+      const gapUp = up < n ? sortedL[up] - l : Infinity;
+      const gapDown = down >= 0 ? l - sortedL[down] : Infinity;
+      const gap = gapUp < gapDown ? gapUp : gapDown;
+      if (!(gap <= SL_MAX * best)) break;
+      const i = gapUp <= gapDown ? order[up++] : order[down--];
+      const d = ciede2000(l, a, b, L[i], A[i], B[i]);
+      if (d < best) { best = d; pick = i; }
+    }
+    assign.set(key, pick);
+  }
+  return assign;
 }
 
 /**
