@@ -8,7 +8,7 @@ import { SourceView, VIEW_NAMES, suggestGridSize, fitViews } from './core/views.
 import { decodeImage, toImageData } from './ui/decode.js';
 import { startBuild, cancelBuild } from './ui/build-task.js';
 import { detectCells, cropCell, guessViews, solveBySize } from './core/sheet.js';
-import { packViewSheet } from './core/viewsheet.js';
+import { packViewSheet, projectViewRows } from './core/viewsheet.js';
 import { Renderer } from './gfx/renderer.js';
 import { OrthoCamera, PITCH_PRESETS, directionYaws, DEG } from './gfx/camera.js';
 import { renderTurnaround, packSheet, snapToPalette, imageDataToPng, downloadBlob } from './export/sprite.js';
@@ -32,6 +32,7 @@ import {
 import { paletteBands, paletteOrder } from './edit/palette-order.js';
 import { mergeOffer } from './edit/merge-offer.js';
 import { strokeSamples, strokeStepPx } from './edit/stroke.js';
+import { ViewStroke, blankSheet, paintAt, eraseAt, pickAt, fillAt } from './edit/draw2d.js';
 import { serializeVolume, deserializeVolume } from './core/serialize.js';
 
 /**
@@ -102,6 +103,28 @@ const state = {
   /** cube radius; 0 is a single voxel */
   brush: 0,
   history: new History(),
+
+  /**
+   * Which of the two things the viewport is: the model, or one of the six
+   * drawings it is carved from. Mutually exclusive on purpose - a mode that
+   * draws on a picture and a mode that draws on voxels cannot share a pointer.
+   * @type {'3d'|'2d'}
+   */
+  mode: '3d',
+  /** The drawing on screen in 2D mode, by view name. */
+  view2d: 'front',
+  /** Whole screen pixels per drawing pixel, 1..64; its own zoom, not the camera's. */
+  zoom2d: 1,
+  /** Where the drawing has been dragged to, in CSS pixels. */
+  pan2d: { x: 0, y: 0 },
+  /**
+   * Views painted, projected or started blank since the last build.
+   *
+   * The model is behind these drawings until the next carve, and the panel says
+   * so rather than leaving it to be discovered (screen spec, section 3.4).
+   * @type {Set<string>}
+   */
+  editedViews: new Set(),
 };
 
 const camera = new OrthoCamera();
@@ -175,6 +198,7 @@ function buildSlots() {
       '<canvas width="52" height="52"></canvas>' +
       '<span class="slot-size"></span>' +
       '<div class="slot-tools">' +
+      '<button data-act="e" data-i18n-title="views.edit">✎</button>' +
       '<button data-act="r" data-i18n-title="views.rotate">↻</button>' +
       '<button data-act="h" data-i18n-title="views.flipH">H</button>' +
       '<button data-act="v" data-i18n-title="views.flipV">V</button>' +
@@ -213,6 +237,14 @@ function buildSlots() {
 function slotAction(name, act) {
   const view = state.views.get(name);
   if (!view) return;
+  // Painting a drawing changes no voxel, so it asks nothing and rebuilds
+  // nothing - it only moves the viewport to the picture (spec 4.4).
+  if (act === 'e') {
+    showView2d(name);
+    setMode('2d');
+    return;
+  }
+  // Turning and flipping keep the pixels; dropping the slot throws them away.
   guardRebuild(() => {
     // Any manual change to how a view sits takes it out of the solvers' hands.
     if (act === 'r') {
@@ -225,22 +257,28 @@ function slotAction(name, act) {
       view.flipV = !view.flipV;
       view.orientLocked = true;
     }
-    if (act === 'x') state.views.delete(name);
+    if (act === 'x') {
+      state.views.delete(name);
+      // The drawing is gone, so it is no longer ahead of anything.
+      state.editedViews.delete(name);
+    }
     refreshSlots();
     build();
-  });
+  }, undefined, act === 'x' ? name : undefined);
 }
 
 /** @param {string} name @param {Blob} file */
 async function loadInto(name, file) {
   try {
     const img = await decodeImage(file);
+    // A new file replaces the slot's drawing whole - including anything painted
+    // on the one already there.
     guardRebuild(() => {
       setView(name, img);
       autoGrid();
       refreshSlots();
       build();
-    });
+    }, undefined, name);
   } catch (err) {
     status('status.badImage', { err: String(err instanceof Error ? err.message : err) }, 'error');
   }
@@ -260,6 +298,10 @@ function refreshSlots() {
     const thumb = /** @type {HTMLCanvasElement} */ (slot.querySelector('canvas'));
     const size = /** @type {HTMLElement} */ (slot.querySelector('.slot-size'));
     slot.classList.toggle('filled', !!view);
+    // Painted here and not yet carved: the model is behind this drawing.
+    const ahead = !!view && state.editedViews.has(name);
+    slot.classList.toggle('edited', ahead);
+    slot.title = ahead ? t('views.edited') : '';
 
     for (const btn of slot.querySelectorAll('.slot-tools button')) {
       const act = /** @type {HTMLElement} */ (btn).dataset.act;
@@ -333,12 +375,27 @@ function autoGrid() {
  * view or pressing Demo on an untouched model is the normal working loop, and
  * a question on every click would be worse than the disease.
  *
+ * Two losses, two questions. A rebuild is what a painted drawing is *waiting*
+ * for, so painting alone never makes `hasEdits` true (spec 4.4) - but Demo,
+ * Clear, loading a project, dropping a PNG into a filled slot and emptying a
+ * slot do not rebuild from the drawing, they destroy it. Those are exactly the
+ * clicks that used to lose a painting without a word.
+ *
+ * @param {string|true} [drawings] the drawings this action destroys: a view
+ *   name, or `true` for all six. Omit when the drawings survive it.
  * @returns {boolean} true when the caller may go ahead and replace the model
  */
-function mayDiscardEdits() {
-  if (!state.history.hasEdits) return true;
-  if (window.confirm(t('edit.rebuildWarning') + '\n\n' + t('edit.rebuildConfirm'))) return true;
-  status('edit.rebuildKept', undefined, 'warn');
+function mayDiscardEdits(drawings) {
+  const losesModel = state.history.hasEdits;
+  const losesDrawing = drawings !== undefined
+    && state.history.hasViewEdits(drawings === true ? undefined : drawings);
+  if (!losesModel && !losesDrawing) return true;
+  // The model is named first when both are at stake: it is the bigger loss,
+  // and its sentence already says the history goes with it.
+  const warn = losesModel ? 'edit.rebuildWarning' : 'edit.drawingWarning';
+  const ask = losesModel ? 'edit.rebuildConfirm' : 'edit.drawingConfirm';
+  if (window.confirm(t(warn) + '\n\n' + t(ask))) return true;
+  status(losesModel ? 'edit.rebuildKept' : 'edit.drawingKept', undefined, 'warn');
   return false;
 }
 
@@ -346,9 +403,10 @@ function mayDiscardEdits() {
  * @param {() => void} proceed what replaces the model
  * @param {() => void} [revert] put back the control the user just moved, so a
  *   refused rebuild does not leave the panel describing a model that is not there
+ * @param {string|true} [drawings] which drawings `proceed` destroys, if any
  */
-function guardRebuild(proceed, revert) {
-  if (mayDiscardEdits()) {
+function guardRebuild(proceed, revert, drawings) {
+  if (mayDiscardEdits(drawings)) {
     proceed();
     return;
   }
@@ -423,7 +481,13 @@ async function build() {
     state.volume = null;
     state.lastStats = null;
     renderer.instanceCount = 0;
-    $('viewport-empty').classList.remove('hidden');
+    state.editedViews.clear();
+    refreshViewsAhead();
+    refreshEmptyViewport();
+    markModeChips();
+    refreshView2dEmpty();
+    refreshView2dReadout();
+    drawView2d();
     updateStats(null, 0);
     // After the volume goes, not before: the reason under the checkbox is
     // "there is no model yet", and it can only be read off a model that is gone.
@@ -496,7 +560,14 @@ async function build() {
   const box = built.box;
   if (box) camera.fit(box, canvas.width || 800, canvas.height || 600);
 
-  $('viewport-empty').classList.toggle('hidden', volume.solidCount > 0);
+  // The carve has now seen every drawing, so none of them is ahead of it.
+  state.editedViews.clear();
+  refreshViewsAhead();
+  refreshEmptyViewport();
+  markModeChips();
+  refreshView2dEmpty();
+  refreshView2dReadout();
+  drawView2d();
   updateStats(stats, faces, box);
   updateZoomLabel();
   updateFramePreview();
@@ -622,6 +693,9 @@ let mapFaces = null;
 
 /** Why the map cannot be shown, as an i18n key, or null when it can. */
 function mapDisabledReason() {
+  // Looking at the model and painting a drawing are two modes, and they do not
+  // combine (`docs/DESIGN.md` section 6, rule 7).
+  if (state.mode === '2d') return 'view2d.mapOff';
   if (state.building) return 'view.mapBuilding';
   if (!state.volume || state.volume.solidCount === 0) return 'view.mapNoModel';
   if (!state.map) return 'view.mapNoData';
@@ -852,32 +926,116 @@ const ANGLE_CHIPS = [
   { key: 'angle.iso', yaw: 45 },
 ];
 
+/**
+ * The pair that says what the viewport is showing.
+ *
+ * The glyphs are not translated: `3D` and `2D` read the same in both
+ * languages, like the numbers on the disagreement scale. The meaning is in the
+ * title (screen spec, section 7).
+ */
+const MODE_CHIPS = /** @type {const} */ ([
+  { mode: '3d', label: '3D', key: 'view2d.toModel' },
+  { mode: '2d', label: '2D', key: 'view2d.toDrawing' },
+]);
+
+function buildModeChips() {
+  const host = $('mode-chips');
+  host.innerHTML = '';
+  for (const chip of MODE_CHIPS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.setAttribute('role', 'radio');
+    b.dataset.mode = chip.mode;
+    b.textContent = chip.label;
+    b.title = t(chip.key);
+    b.addEventListener('click', () => setMode(chip.mode));
+    host.appendChild(b);
+  }
+  markModeChips();
+}
+
+/** The 2D chip is dark when there is nothing to paint and nothing to project. */
+function mode2dAvailable() {
+  return state.views.size > 0 || !!(state.volume && state.volume.solidCount > 0);
+}
+
+function markModeChips() {
+  const available = mode2dAvailable();
+  for (const el of $('mode-chips').querySelectorAll('button')) {
+    const b = /** @type {HTMLButtonElement} */ (el);
+    const on = b.dataset.mode === state.mode;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-checked', on ? 'true' : 'false');
+    b.tabIndex = on ? 0 : -1;
+    b.disabled = b.dataset.mode === '2d' && !available && state.mode !== '2d';
+  }
+}
+
+/**
+ * The second group in the overlay: five camera angles in 3D, the six drawings
+ * in 2D. One row, so it always answers the same question - what am I looking
+ * at - whichever mode is on.
+ *
+ * One row means one tab stop, arrows inside, in *both* modes (screen spec
+ * section 8; `#mode-chips` next to it already works this way). The row is a
+ * single control whose contents swap with the mode; giving the keyboard one
+ * path in 2D and six tab stops in 3D would change the way the row behaves
+ * under a user who only pressed P.
+ */
 function buildAngleChips() {
   const host = $('angle-chips');
   host.innerHTML = '';
-  for (const chip of ANGLE_CHIPS) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.dataset.i18n = chip.key;
-    b.textContent = t(chip.key);
-    b.addEventListener('click', () => {
-      camera.yaw = chip.yaw * DEG;
-      camera.panX = 0;
-      camera.panY = 0;
-      state.dirty = true;
-      markActiveChip();
-    });
-    host.appendChild(b);
+  host.setAttribute('role', 'radiogroup');
+  host.setAttribute('aria-label', t(state.mode === '2d' ? 'views.heading' : 'view.heading'));
+  if (state.mode === '2d') {
+    for (const name of VIEW_NAMES) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.setAttribute('role', 'radio');
+      b.dataset.view = name;
+      b.dataset.i18n = 'views.' + name;
+      b.textContent = t('views.' + name);
+      b.addEventListener('click', () => showView2d(name));
+      host.appendChild(b);
+    }
+  } else {
+    for (const chip of ANGLE_CHIPS) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.setAttribute('role', 'radio');
+      b.dataset.i18n = chip.key;
+      b.textContent = t(chip.key);
+      b.addEventListener('click', () => {
+        camera.yaw = chip.yaw * DEG;
+        camera.panX = 0;
+        camera.panY = 0;
+        state.dirty = true;
+        markActiveChip();
+      });
+      host.appendChild(b);
+    }
   }
   markActiveChip();
 }
 
 function markActiveChip() {
+  const buttons = /** @type {NodeListOf<HTMLButtonElement>} */
+    ($('angle-chips').querySelectorAll('button'));
   const deg = ((camera.yaw / DEG) % 360 + 360) % 360;
-  const buttons = $('angle-chips').querySelectorAll('button');
-  ANGLE_CHIPS.forEach((chip, i) => {
-    buttons[i]?.classList.toggle('on', Math.abs(deg - chip.yaw) < 0.01);
+  let active = -1;
+  buttons.forEach((b, i) => {
+    const on = state.mode === '2d'
+      ? b.dataset.view === state.view2d
+      : !!ANGLE_CHIPS[i] && Math.abs(deg - ANGLE_CHIPS[i].yaw) < 0.01;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-checked', on ? 'true' : 'false');
+    if (on && active < 0) active = i;
   });
+  // A camera turned by hand matches no chip, and a row where every button is
+  // tabIndex -1 would be unreachable from the keyboard at all: the first chip
+  // holds the stop until one of them is current again.
+  const stop = active < 0 ? 0 : active;
+  buttons.forEach((b, i) => { b.tabIndex = i === stop ? 0 : -1; });
 }
 
 function buildPitchPresets() {
@@ -906,23 +1064,671 @@ function wirePitchPresets() {
 }
 
 function updateZoomLabel() {
-  $('zoom-label').textContent = camera.pixelsPerVoxel + '×';
+  const drawing = state.mode === '2d';
+  $('zoom-label').textContent = (drawing ? state.zoom2d : camera.pixelsPerVoxel) + '×';
   // Saying "there is no grid yet, and here is the zoom that brings it" beats
-  // leaving an empty viewport to be worked out.
-  $('bounds-hint').textContent = t('view.boundsHint', {
-    min: GRID_MIN_ZOOM,
-    now: camera.pixelsPerVoxel,
-  });
+  // leaving an empty viewport to be worked out. The same checkbox drives the
+  // grid in both modes, so the line under it names the threshold of the mode
+  // that is on (screen spec, section 6.5).
+  $('bounds-hint').textContent = drawing
+    ? t('view2d.gridHint', { min: GRID_MIN_CELL_PX, now: state.zoom2d })
+    : t('view.boundsHint', { min: GRID_MIN_ZOOM, now: camera.pixelsPerVoxel });
 }
 
 /** @param {number} delta */
 function zoomBy(delta) {
+  if (state.mode === '2d') {
+    state.zoom2d = Math.max(1, Math.min(64, state.zoom2d + delta));
+    updateZoomLabel();
+    drawView2d();
+    return;
+  }
   camera.pixelsPerVoxel = Math.max(1, Math.min(64, camera.pixelsPerVoxel + delta));
   // The patch belongs to a cell under a cursor that has not moved since; at a
   // new zoom it may not be drawn at all.
   renderer.clearGrid();
   updateZoomLabel();
   state.dirty = true;
+}
+
+// --------------------------------------------------------- drawing mode
+
+/**
+ * Painting the drawings themselves, without leaving the tab.
+ *
+ * The heavy half was written for the round trip (`src/core/viewsheet.js`):
+ * `projectView` turns a model back into any of the six drawings, and the
+ * slicer reads a sheet back in. What is added here is a flat canvas and the
+ * brush over it - no second carve, no second projection, no format of our own.
+ * The screen is specified in
+ * `docs/specs/2026-09-24-3-view-editing-2d-3d.md`.
+ *
+ * The one rule that holds the mode together: **painting a drawing does not
+ * touch the model.** A carve costs 1.1 s at 256 and 11 s at 512
+ * (`docs/TESTING.md`, `tests/perf`), so a rebuild per brush stroke would put a
+ * progress bar under every dab. The model catches up when "Build model" is
+ * pressed, and until then the panel says out loud which drawings are ahead of
+ * it (spec 4.4 and 3.4).
+ */
+
+const view2d = /** @type {HTMLCanvasElement} */ ($('view2d'));
+
+/**
+ * Lowest zoom at which the cell grid is drawn over a drawing, in screen pixels
+ * per grid cell.
+ *
+ * Not a new number: `DECISIONS.md` fixes the floor of readability at 6 px - a
+ * 1 px line with a 5 px hole beside it - and `GRID_MIN_ZOOM` is that floor
+ * divided by the 0.5774 voxel the tightest cell spans under the 2:1 dimetric.
+ * A drawing faces the screen square on, the foreshortening is 1, and the same
+ * floor lands on 6 px of cell (spec 4.2). At one art pixel per cell that is
+ * zoom 6; on art denser than the grid the grid appears sooner, because a cell
+ * is then wider than a pixel.
+ */
+const GRID_MIN_CELL_PX = 6;
+
+/**
+ * Cost of projecting one view, in milliseconds at a 512 grid.
+ *
+ * Measured, not guessed: the screen specification's browser run gives 38 ms at
+ * 128, 256 ms at 256 and 1943 ms at 512, which is the cube law within the
+ * noise. Node agrees on the shape of the curve and is faster in absolute terms
+ * - 171 / 438 / 1181 ms at 256 / 384 / 512 on a worst case where almost every
+ * ray walks the whole depth (measured 2026-09-24) - so the figure quoted to
+ * the user is the slower of the two. Saying the price for the grid that is
+ * actually selected is the point; "this may take a while" is what it replaces
+ * (spec 6.4).
+ */
+const PROJECT_MS_AT_512 = 1943;
+
+/** Rows per progress step: silence never covers more than a sixteenth. */
+const PROJECT_STEPS = 16;
+
+/** Grids from which the projection shows a bar; below it is under a third of a second. */
+const PROJECT_BAR_FROM = 384;
+
+/** @param {number} n grid size @returns {string} seconds, as the button says them */
+function projectCost(n) {
+  const sec = (PROJECT_MS_AT_512 * (n / 512) ** 3) / 1000;
+  // Never "0.00 s": a price of zero reads as a broken readout rather than as a
+  // cheap operation, and at 16 or 24 the walk really is under a hundredth.
+  if (sec < 0.01) return '0.01';
+  return sec < 0.1 ? sec.toFixed(2) : sec.toFixed(1);
+}
+
+/**
+ * A CSS custom property, as a colour string the 2D context understands.
+ * Read rather than written down: a theme switch has to reach the canvas too
+ * (`docs/DESIGN.md` section 2 - no colour is spelled out in code).
+ * @param {string} name
+ */
+function themeVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+/** The drawing on screen, or null when this slot is empty. */
+function currentDrawing() {
+  return state.views.get(state.view2d) ?? null;
+}
+
+/**
+ * Where the drawing sits on the canvas, in CSS pixels.
+ *
+ * `w` and `h` are the size *after* the slot's quarter turn, because what the
+ * canvas shows is the drawing as the carve sees it (spec 4.3), and a turned
+ * drawing swaps its sides.
+ */
+function view2dLayout() {
+  const view = currentDrawing();
+  if (!view) return null;
+  const turned = view.rotate % 180 !== 0;
+  const w = turned ? view.image.height : view.image.width;
+  const h = turned ? view.image.width : view.image.height;
+  const z = state.zoom2d;
+  const cw = view2d.clientWidth || 1;
+  const ch = view2d.clientHeight || 1;
+  return {
+    view, w, h, z, cw, ch,
+    ox: Math.round((cw - w * z) / 2) + state.pan2d.x,
+    oy: Math.round((ch - h * z) / 2) + state.pan2d.y,
+  };
+}
+
+/** The whole zoom that fits the drawing with an 8% margin, as `camera.fit` does. */
+function fitView2d() {
+  state.pan2d = { x: 0, y: 0 };
+  const l = view2dLayout();
+  if (!l) return;
+  const z = Math.floor(Math.min((l.cw * 0.84) / l.w, (l.ch * 0.84) / l.h));
+  state.zoom2d = Math.max(1, Math.min(64, z));
+  updateZoomLabel();
+}
+
+/**
+ * Turn a point on the canvas into a pixel of the drawing as it is displayed.
+ * @param {{clientX: number, clientY: number}} e
+ * @returns {[number, number] | null} null when the point is off the drawing
+ */
+function view2dPixel(e) {
+  const l = view2dLayout();
+  if (!l) return null;
+  const rect = view2d.getBoundingClientRect();
+  const a = Math.floor((e.clientX - rect.left - l.ox) / l.z);
+  const b = Math.floor((e.clientY - rect.top - l.oy) / l.z);
+  if (a < 0 || b < 0 || a >= l.w || b >= l.h) return null;
+  return [a, b];
+}
+
+/**
+ * The source pixel a displayed pixel came from.
+ *
+ * The inverse of what `drawThumb` paints and what `SourceView.toSource` does
+ * for the carve - the same four cases, over the whole image rather than over
+ * its trimmed content, because the editor writes into raw pixels.
+ * @param {import('./core/views.js').SourceView} view
+ * @param {number} a @param {number} b
+ * @returns {[number, number]}
+ */
+function sourcePixel(view, a, b) {
+  const w = view.image.width, h = view.image.height;
+  let tx, ty;
+  switch (view.rotate) {
+    case 90: tx = b; ty = h - 1 - a; break;
+    case 180: tx = w - 1 - a; ty = h - 1 - b; break;
+    case 270: tx = w - 1 - b; ty = a; break;
+    default: tx = a; ty = b;
+  }
+  if (view.flipH) tx = w - 1 - tx;
+  if (view.flipV) ty = h - 1 - ty;
+  return [tx, ty];
+}
+
+/** Source pixels per grid cell, as the last build placed the art. */
+const cellInPixels = () => (state.fitScale > 1.001 ? state.fitScale : 1);
+
+/** Scratch canvas holding the drawing itself. @type {HTMLCanvasElement | null} */
+let drawingScratch = null;
+
+/** Push the drawing's bytes onto the scratch canvas the compositor draws from. */
+function refreshDrawingScratch() {
+  const view = currentDrawing();
+  if (!view) {
+    drawingScratch = null;
+    return;
+  }
+  if (!drawingScratch) drawingScratch = document.createElement('canvas');
+  drawingScratch.width = view.image.width;
+  drawingScratch.height = view.image.height;
+  const ctx = drawingScratch.getContext('2d');
+  if (ctx) ctx.putImageData(toImageData(view.image), 0, 0);
+}
+
+/** Repaint the flat viewport. Cheap: one `drawImage` plus a frame and a grid. */
+function drawView2d() {
+  if (state.mode !== '2d') return;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const cw = view2d.clientWidth || 1;
+  const ch = view2d.clientHeight || 1;
+  if (view2d.width !== Math.round(cw * dpr) || view2d.height !== Math.round(ch * dpr)) {
+    view2d.width = Math.round(cw * dpr);
+    view2d.height = Math.round(ch * dpr);
+  }
+  const ctx = view2d.getContext('2d');
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cw, ch);
+
+  const l = view2dLayout();
+  if (!l || !drawingScratch) return;
+  const pw = l.w * l.z, ph = l.h * l.z;
+
+  // The transparency check is 8 screen pixels whatever the zoom, exactly as it
+  // is in a slot: it is a property of the surface, not of the picture.
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(l.ox, l.oy, pw, ph);
+  ctx.clip();
+  ctx.fillStyle = themeVar('--checker-b') || '#12151d';
+  ctx.fillRect(l.ox, l.oy, pw, ph);
+  ctx.fillStyle = themeVar('--checker-a') || '#1a1e28';
+  for (let y = 0; y < ph; y += 8) {
+    for (let x = ((y / 8) % 2) * 8; x < pw; x += 16) {
+      ctx.fillRect(l.ox + x, l.oy + y, 8, 8);
+    }
+  }
+  ctx.restore();
+
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  ctx.translate(l.ox + pw / 2, l.oy + ph / 2);
+  ctx.rotate((l.view.rotate * Math.PI) / 180);
+  // Flips happen in the drawing's own space, before the turn - the same order
+  // `drawThumb` and the sampler use.
+  ctx.scale(l.view.flipH ? -1 : 1, l.view.flipV ? -1 : 1);
+  const sw = l.view.image.width * l.z, sh = l.view.image.height * l.z;
+  ctx.drawImage(drawingScratch, -sw / 2, -sh / 2, sw, sh);
+  ctx.restore();
+
+  // The cell grid, when a cell is wide enough to aim into and the checkbox that
+  // draws the grid on the model is on.
+  const cellPx = l.z * cellInPixels();
+  if (/** @type {HTMLInputElement} */ ($('bounds-toggle')).checked && cellPx >= GRID_MIN_CELL_PX) {
+    ctx.strokeStyle = themeVar('--line-soft') || '#1c202a';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = 0; x <= pw + 0.5; x += cellPx) {
+      ctx.moveTo(Math.round(l.ox + x) + 0.5, l.oy);
+      ctx.lineTo(Math.round(l.ox + x) + 0.5, l.oy + ph);
+    }
+    for (let y = 0; y <= ph + 0.5; y += cellPx) {
+      ctx.moveTo(l.ox, Math.round(l.oy + y) + 0.5);
+      ctx.lineTo(l.ox + pw, Math.round(l.oy + y) + 0.5);
+    }
+    ctx.stroke();
+  }
+
+  ctx.strokeStyle = themeVar('--line') || '#262b38';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(l.ox - 0.5, l.oy - 0.5, pw + 1, ph + 1);
+}
+
+/** One monospaced line: how big the drawing is and how it lands on the grid. */
+function refreshView2dReadout() {
+  const el = $('view2d-readout');
+  const l = state.mode === '2d' ? view2dLayout() : null;
+  if (!l) {
+    el.textContent = '';
+    return;
+  }
+  const k = cellInPixels();
+  el.textContent = k > 1.001
+    ? t('view2d.scaled', { w: l.w, h: l.h, n: state.gridSize, k: k.toFixed(2) })
+    : t('view2d.exact', { w: l.w, h: l.h, n: state.gridSize });
+}
+
+/** The invitation shown where a drawing would be, and the price of filling it. */
+function refreshView2dEmpty() {
+  const host = $('view2d-empty');
+  const empty = state.mode === '2d' && !currentDrawing();
+  host.classList.toggle('hidden', !empty);
+  if (!empty) return;
+
+  const hasModel = !!state.volume && state.volume.solidCount > 0;
+  $('view2d-empty-title').textContent = t(hasModel ? 'view2d.empty' : 'view2d.noModel');
+
+  const take = /** @type {HTMLButtonElement} */ ($('btn-view-take'));
+  const blank = /** @type {HTMLButtonElement} */ ($('btn-view-blank'));
+  take.textContent = t('view2d.take');
+  blank.textContent = t('view2d.blank', { n: state.gridSize });
+  take.disabled = !hasModel || state.building;
+  blank.disabled = state.building;
+
+  // The reason a button is dark stands under it, and so does the price of the
+  // one that is lit: a number of seconds for this grid, not "this may be slow".
+  $('view2d-empty-cost').textContent = state.building
+    ? t('view2d.building')
+    : hasModel ? t('view2d.takeCost', { s: projectCost(state.gridSize), n: state.gridSize }) : '';
+  $('view2d-empty-note').textContent = hasModel && !state.building ? t('view2d.takeNote') : '';
+}
+
+/** Which drawings the model has not seen, under the button that would fix it. */
+function refreshViewsAhead() {
+  const el = $('views-ahead');
+  const names = VIEW_NAMES.filter((n) => state.editedViews.has(n) && state.views.has(n));
+  el.classList.toggle('hidden', names.length === 0);
+  if (names.length === 0) return;
+  el.textContent = t('grid.viewsAhead', { views: names.map((n) => t('views.' + n)).join(', ') });
+}
+
+/** @param {string} name */
+function markViewEdited(name) {
+  state.editedViews.add(name);
+  refreshViewsAhead();
+  refreshSlots();
+}
+
+/**
+ * Show a drawing. Keeps the zoom when the size has not changed, so stepping
+ * through the six views does not throw the artist's zoom away each time.
+ * @param {string} name
+ */
+function showView2d(name) {
+  const before = view2dLayout();
+  state.view2d = name;
+  refreshDrawingScratch();
+  const after = view2dLayout();
+  if (!before || !after || before.w !== after.w || before.h !== after.h) fitView2d();
+  clearHover();
+  markActiveChip();
+  refreshView2dEmpty();
+  refreshView2dReadout();
+  updateZoomLabel();
+  drawView2d();
+}
+
+/**
+ * Switch between the model and the drawings.
+ *
+ * The two modes do not overlap: `#gl` goes away entirely while a drawing is on
+ * screen, and the disagreement map - which is a way of *looking* at the model -
+ * goes with it (`docs/DESIGN.md` section 6, rule 7).
+ * @param {'3d'|'2d'} mode
+ */
+function setMode(mode) {
+  if (mode === state.mode) return;
+  if (mode === '2d' && !mode2dAvailable()) return;
+  if (mode === '2d' && state.mapOn) setMapMode(false);
+  state.mode = mode;
+  // A block lives in the volume; there is nothing to select on a drawing.
+  if (mode === '2d') clearSelection();
+  clearHover();
+  canvas.classList.toggle('hidden', mode === '2d');
+  view2d.classList.toggle('hidden', mode !== '2d');
+  refreshEmptyViewport();
+  buildAngleChips();
+  markModeChips();
+  markActiveTool();
+  refreshToolControls();
+  refreshMapPanel();
+  if (mode === '2d') {
+    refreshDrawingScratch();
+    fitView2d();
+  }
+  refreshView2dEmpty();
+  refreshView2dReadout();
+  updateZoomLabel();
+  drawView2d();
+  state.dirty = true;
+}
+
+/** The 3D invitation belongs to the 3D viewport and goes away with it. */
+function refreshEmptyViewport() {
+  const hasModel = !!state.volume && state.volume.solidCount > 0;
+  $('viewport-empty').classList.toggle('hidden', state.mode === '2d' || hasModel);
+}
+
+// ------------------------------------------------ filling an empty drawing
+
+/** @param {string} name @param {{width: number, height: number, data: Uint8ClampedArray}} img */
+function putDrawing(name, img) {
+  setView(name, /** @type {any} */ (img));
+  markViewEdited(name);
+  refreshDrawingScratch();
+  fitView2d();
+  refreshView2dEmpty();
+  refreshView2dReadout();
+  updateZoomLabel();
+  markModeChips();
+  drawView2d();
+}
+
+/** A blank square at the grid's own size - see `blankSheet` for why square. */
+function makeBlankDrawing() {
+  const n = state.gridSize;
+  putDrawing(state.view2d, blankSheet(n));
+  status('view2d.blankMade', { n, view: ['views.' + state.view2d] });
+}
+
+/** True while a projection is walking the model, so a second press is refused. */
+let projecting = false;
+
+/**
+ * Take the missing drawing off the model.
+ *
+ * Spread over frames rather than run in one blocking call: at 512 the walk
+ * costs about two seconds, and `docs/DESIGN.md` section 6 wants a bar on
+ * anything over a second. Sixteen steps, so silence never covers more than a
+ * sixteenth of the work.
+ */
+async function takeDrawingFromModel() {
+  const vol = state.volume;
+  if (!vol || vol.solidCount === 0 || state.building || projecting) return;
+  const name = state.view2d;
+  const N = vol.nx;
+  if (vol.ny !== N || vol.nz !== N) return;
+
+  projecting = true;
+  const bar = N >= PROJECT_BAR_FROM;
+  const out = new Uint8ClampedArray(N * N * 4);
+  const step = Math.max(1, Math.ceil(N / PROJECT_STEPS));
+  try {
+    for (let v = 0; v < N; v += step) {
+      const end = Math.min(N, v + step);
+      projectViewRows(vol, state.palette, name, v, end, out);
+      if (bar) {
+        showProjectProgress(end / N);
+        status('view2d.projecting', { view: ['views.' + name] });
+        await nextFrame();
+      }
+    }
+  } finally {
+    projecting = false;
+    if (bar) showBuildProgress(null);
+  }
+
+  let opaque = 0;
+  for (let i = 3; i < out.length; i += 4) if (out[i] >= 128) opaque++;
+  putDrawing(name, { width: N, height: N, data: out });
+  if (opaque === 0) status('view2d.takenEmpty', undefined, 'warn');
+  else status('view2d.taken', { view: ['views.' + name], n: opaque });
+}
+
+/**
+ * The same bar the build uses, without the build's own wording: the projection
+ * says what it is doing in the status line itself.
+ * @param {number} fraction 0..1
+ */
+function showProjectProgress(fraction) {
+  const host = $('build-progress');
+  const pct = Math.round(fraction * 100);
+  host.classList.remove('hidden');
+  host.setAttribute('aria-valuenow', String(pct));
+  /** @type {HTMLElement} */ ($('build-progress-fill')).style.width = pct + '%';
+}
+
+// ------------------------------------------------------- drawing with tools
+
+/** The stroke being painted on a drawing, or null. @type {ViewStroke | null} */
+let stroke2d = null;
+
+/** Where the 2D stroke last applied, in displayed pixels. @type {[number, number] | null} */
+let stroke2dLast = null;
+
+/** Open a stroke on the drawing on screen. */
+function beginStroke2d() {
+  const view = currentDrawing();
+  if (!view) return;
+  stroke2d = new ViewStroke(state.view2d, /** @type {any} */ (view.image));
+}
+
+/**
+ * Close the stroke: one undo step, one line in the status bar, one redraw of
+ * the thumbnail - and the trim recomputed, because where the ink stops is what
+ * decides how the drawing lands on the grid.
+ */
+function endStroke2d() {
+  const s = stroke2d;
+  stroke2d = null;
+  if (!s) return;
+  const entry = s.finish();
+  if (!entry) {
+    // `status.editedNothing` talks about a face already wearing the colour,
+    // which is not what happened here; the same line with a zero is the honest
+    // one, and it names the drawing the hand was over.
+    if (state.tool !== 'pick' && state.tool !== 'orbit') {
+      hoverLine = null;
+      status('view2d.stroke', { view: ['views.' + s.name], n: 0 }, 'warn');
+    }
+    return;
+  }
+  state.history.pushView(entry);
+  afterDrawingChanged(s.name);
+  hoverLine = null;
+  status('view2d.stroke', { view: ['views.' + s.name], n: s.count });
+  refreshHistoryButtons();
+}
+
+/**
+ * Everything that has to follow a drawing changing, whoever changed it - a
+ * stroke, an undo or a redo.
+ * @param {string} name
+ */
+function afterDrawingChanged(name) {
+  const view = state.views.get(name);
+  if (view) view.computeTrim();
+  markViewEdited(name);
+  if (name === state.view2d) {
+    refreshDrawingScratch();
+    refreshView2dReadout();
+    drawView2d();
+  }
+}
+
+/**
+ * Run the armed tool at one point of the drawing.
+ * @param {number} a @param {number} b displayed pixel
+ * @returns {boolean} the pointer was over the drawing
+ */
+function runTool2dAt(a, b) {
+  const view = currentDrawing();
+  if (!view || state.tool === 'orbit') return false;
+  const img = /** @type {any} */ (view.image);
+  const [x, y] = sourcePixel(view, a, b);
+
+  if (state.tool === 'pick') {
+    const picked = pickAt(img, x, y);
+    if (picked === null) {
+      hoverLine = null;
+      status('view2d.pickEmpty', undefined, 'warn');
+      return true;
+    }
+    const idx = state.palette.add((picked >> 16) & 255, (picked >> 8) & 255, picked & 255);
+    uploadPalette();
+    refreshPalette();
+    selectSwatch(idx);
+    focusSwatch(idx);
+    hoverLine = null;
+    status('status.picked', { i: idx, hex: state.palette.hex(idx) });
+    return true;
+  }
+
+  if (!stroke2d) beginStroke2d();
+  const s = stroke2d;
+  if (!s) return false;
+  const rgb = state.palette.colors[state.color] | 0;
+  if (state.tool === 'paint') s.count += paintAt(img, x, y, brushRadius(), rgb);
+  else if (state.tool === 'erase') s.count += eraseAt(img, x, y, brushRadius());
+  else if (state.tool === 'fill') s.count += fillAt(img, x, y, rgb).count;
+  refreshDrawingScratch();
+  drawView2d();
+  return true;
+}
+
+/**
+ * What is under the cursor, in the status line.
+ * @param {PointerEvent} e
+ */
+function updateHover2d(e) {
+  const view = currentDrawing();
+  const at = view ? view2dPixel(e) : null;
+  if (!view || !at) {
+    if (hoverLine) {
+      hoverLine = null;
+      renderStatus();
+    }
+    return;
+  }
+  const [x, y] = sourcePixel(view, at[0], at[1]);
+  const img = view.image;
+  const o = (y * img.width + x) * 4;
+  const where = { view: ['views.' + state.view2d], x: String(at[0]), y: String(at[1]) };
+  if (img.data[o + 3] < 128) {
+    setHoverLine('view2d.hoverEmpty', where);
+    return;
+  }
+  const hex = '#' + [img.data[o], img.data[o + 1], img.data[o + 2]]
+    .map((v) => v.toString(16).padStart(2, '0')).join('');
+  setHoverLine('view2d.hover', { ...where, hex });
+}
+
+/** True when the viewport has changed size since the flat canvas was drawn. */
+function view2dNeedsResize() {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  return view2d.width !== Math.round((view2d.clientWidth || 1) * dpr)
+    || view2d.height !== Math.round((view2d.clientHeight || 1) * dpr);
+}
+
+function setupPointer2d() {
+  let mode = /** @type {null | 'pan' | 'tool'} */ (null);
+  let lastX = 0, lastY = 0;
+
+  view2d.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  view2d.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    lastX = e.clientX;
+    lastY = e.clientY;
+    try { view2d.setPointerCapture(e.pointerId); } catch { /* not fatal */ }
+    if (e.button === 1 || e.ctrlKey || e.button === 2 || e.shiftKey || state.tool === 'orbit') {
+      mode = 'pan';
+      view2d.classList.add('dragging');
+      return;
+    }
+    mode = 'tool';
+    const at = view2dPixel(e);
+    stroke2dLast = at;
+    if (at) runTool2dAt(at[0], at[1]);
+  });
+
+  view2d.addEventListener('pointermove', (e) => {
+    if (!mode) {
+      updateHover2d(e);
+      return;
+    }
+    if (mode === 'pan') {
+      state.pan2d.x += e.clientX - lastX;
+      state.pan2d.y += e.clientY - lastY;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      drawView2d();
+      return;
+    }
+    // A drag is resampled the way a stroke on the model is, so a fast hand
+    // leaves a line rather than a dotted trail. Half a pixel of step, because
+    // the step is already in the units the tool applies in.
+    const at = view2dPixel(e);
+    if (!at) return;
+    if (stroke2dLast) {
+      for (const [sx, sy] of strokeSamples(stroke2dLast[0], stroke2dLast[1], at[0], at[1], 0.5)) {
+        runTool2dAt(Math.round(sx), Math.round(sy));
+      }
+    } else {
+      runTool2dAt(at[0], at[1]);
+    }
+    stroke2dLast = at;
+  });
+
+  const end = (/** @type {PointerEvent} */ e) => {
+    if (mode === 'tool') endStroke2d();
+    mode = null;
+    stroke2dLast = null;
+    view2d.classList.remove('dragging');
+    try {
+      if (view2d.hasPointerCapture(e.pointerId)) view2d.releasePointerCapture(e.pointerId);
+    } catch { /* not fatal */ }
+  };
+  view2d.addEventListener('pointerup', end);
+  view2d.addEventListener('pointercancel', end);
+  view2d.addEventListener('pointerleave', () => {
+    if (!hoverLine) return;
+    hoverLine = null;
+    renderStatus();
+  });
+
+  view2d.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    zoomBy(e.deltaY < 0 ? 1 : -1);
+  }, { passive: false });
 }
 
 // ---------------------------------------------------------- sheet slicing
@@ -1050,6 +1856,12 @@ const TOOL_BUTTONS = [
  */
 const BRUSHLESS_TOOLS = new Set(['orbit', 'fill', 'pick', 'box']);
 
+/**
+ * Tools that have nothing to act on in a drawing. Add puts a voxel beside the
+ * one under the cursor and the Box marks a volume; a picture has neither.
+ */
+const TOOLS_OFF_IN_2D = new Set(['add', 'box']);
+
 /** Axis names for the hover line. Not translated: they are axes, not words. */
 const FACE_NAMES = ['+X', '\u2212X', '+Y', '\u2212Y', '+Z', '\u2212Z'];
 
@@ -1082,6 +1894,9 @@ function setTool(tool) {
   // A viewing mode has one tool. Asking for another from the keyboard or the
   // toolbar is refused rather than silently obeyed.
   if (state.mapOn && tool !== 'orbit') return;
+  // A drawing has no voxels: Add lays a cube and the Box marks a block, and
+  // neither has anything to work on here (spec 6.2).
+  if (state.mode === '2d' && TOOLS_OFF_IN_2D.has(tool)) return;
   const wasBox = isBoxTool();
   state.tool = tool;
   // A block belongs to the box tool; leaving the tool leaves the block.
@@ -1101,7 +1916,9 @@ function markActiveTool() {
     el.setAttribute('aria-checked', on ? 'true' : 'false');
     el.tabIndex = on ? 0 : -1;
   }
-  canvas.className = state.tool === 'orbit' ? '' : 'tool-' + state.tool;
+  const cursor = state.tool === 'orbit' ? '' : 'tool-' + state.tool;
+  canvas.className = (state.mode === '2d' ? 'hidden ' : '') + cursor;
+  view2d.className = (state.mode === '2d' ? '' : 'hidden ') + cursor;
 }
 
 /**
@@ -1112,28 +1929,45 @@ function markActiveTool() {
  * brings its own line saying why.
  */
 function refreshToolControls() {
+  const drawing = state.mode === '2d';
   const hint = $('tool-hint');
+  // One line under the row explains everything that is dark there, and the
+  // same line covers the two checkboxes below it (`docs/DESIGN.md` section 6,
+  // rule 3; spec 6.2 and 6.3) - not one warning each.
   hint.textContent = state.mapOn
     ? t('edit.mapReadOnly')
-    : t(isBoxTool() ? 'edit.boxHint' : 'tool.' + state.tool + '.hint');
-  hint.classList.toggle('warn', state.mapOn);
+    : drawing
+      ? t('view2d.toolsOff')
+      : t(isBoxTool() ? 'edit.boxHint' : 'tool.' + state.tool + '.hint');
+  hint.classList.toggle('warn', state.mapOn || drawing);
   for (const b of $('tool-bar').querySelectorAll('button')) {
     const el = /** @type {HTMLButtonElement} */ (b);
-    el.disabled = state.mapOn && el.dataset.tool !== 'orbit';
+    el.disabled = (state.mapOn && el.dataset.tool !== 'orbit')
+      || (drawing && TOOLS_OFF_IN_2D.has(el.dataset.tool ?? ''));
   }
 
   const brush = /** @type {HTMLInputElement} */ ($('brush-size'));
   const brushOff = BRUSHLESS_TOOLS.has(state.tool);
   brush.disabled = brushOff;
-  $('brush-label').textContent = brushOff ? '\u2014' : (state.brush * 2 + 1) + '\u00b3';
+  // A brush on a drawing is flat, and a cube in the label would be a lie
+  // (spec 10.3). Same slider, same five steps.
+  const unit = drawing ? '\u00b2' : '\u00b3';
+  $('brush-label').textContent = brushOff ? '\u2014' : (state.brush * 2 + 1) + unit;
   $('brush-note').classList.toggle('hidden', !brushOff);
 
   const faceOnly = /** @type {HTMLInputElement} */ ($('face-only'));
-  const faceOff = state.tool !== 'paint';
+  const faceOff = drawing || state.tool !== 'paint';
   // Disabling keeps the checkbox's value, so the setting comes back with the
   // brush instead of being silently reset every time another tool is used.
   faceOnly.disabled = faceOff;
-  $('face-only-note').classList.toggle('hidden', !faceOff);
+  // In the drawing mode the reason is the shared line above; a second warning
+  // saying the same thing twice is what rule 3 forbids.
+  $('face-only-note').classList.toggle('hidden', drawing || !faceOff);
+  // The X mirror measures the centre of the *grid*, not of a drawing, and the
+  // parity defect that pairs it with `autoPlace` is still open
+  // (`docs/BATCH.md`). Painting a drawing through it would multiply a known
+  // mistake, so it goes dark and the shared line says why (spec 6.3).
+  /** @type {HTMLInputElement} */ ($('symmetry-x')).disabled = drawing;
 }
 
 // --------------------------------------------------------- palette panel
@@ -1599,7 +2433,9 @@ function reportStroke() {
 }
 
 function undo() {
-  const kind = state.volume && !state.building ? state.history.undo(state.volume, state.palette) : null;
+  // A drawing can be painted before anything has ever been built, so undo is
+  // not the model's alone any more; a voxel step still refuses without one.
+  const kind = !state.building ? state.history.undo(state.volume, state.palette) : null;
   if (!kind) {
     status('status.nothingToUndo');
     return;
@@ -1609,7 +2445,7 @@ function undo() {
 }
 
 function redo() {
-  const kind = state.volume && !state.building ? state.history.redo(state.volume, state.palette) : null;
+  const kind = !state.building ? state.history.redo(state.volume, state.palette) : null;
   if (!kind) return;
   afterHistoryStep(kind);
   status('status.redone');
@@ -1622,9 +2458,19 @@ function redo() {
  * 1 KB texture change.
  * A merge is both at once: it freed slots and rewrote the face bytes that named
  * them, so the texture, the panel and the face buffer all have to be redone.
- * @param {'voxels'|'palette'|'merge'} kind
+ * A drawing is none of those: undoing a stroke on a picture leaves every voxel
+ * where it was, and the model stays exactly as far behind as it was.
+ * @param {'voxels'|'palette'|'merge'|'view'} kind
  */
 function afterHistoryStep(kind) {
+  if (kind === 'view') {
+    // Exactly the drawing the step wrote into. Refreshing all six would mark
+    // views the artist never touched as ahead of the model.
+    const name = state.history.lastView;
+    if (name) afterDrawingChanged(name);
+    refreshHistoryButtons();
+    return;
+  }
   if (kind === 'palette' || kind === 'merge') {
     uploadPalette();
     // Undoing a merge brings a freed slot back; redoing one takes it away
@@ -2567,7 +3413,8 @@ async function loadProject(file) {
     // Both branches below replace the model - the saved-voxels one clears the
     // history too, because its entries point at coordinates of a volume that is
     // about to be gone. So the question belongs here, before anything is lost.
-    if (!mayDiscardEdits()) return;
+    // The file brings its own six drawings, so whatever is painted here goes.
+    if (!mayDiscardEdits(true)) return;
     state.views.clear();
     for (const name of VIEW_NAMES) {
       const v = data.views?.[name];
@@ -2581,6 +3428,10 @@ async function loadProject(file) {
     }
     state.gridSize = data.gridSize || 32;
     /** @type {HTMLSelectElement} */ ($('grid-size')).value = String(state.gridSize);
+    // The file's drawings and the file's model came out of the same save, so
+    // nothing is ahead of anything.
+    state.editedViews.clear();
+    refreshViewsAhead();
     refreshSlots();
 
     if (data.volume && data.palette) {
@@ -2603,7 +3454,11 @@ async function loadProject(file) {
       const faces = renderer.setVolume(state.volume);
       const box = state.volume.bounds();
       if (box) camera.fit(box, canvas.width || 800, canvas.height || 600);
-      $('viewport-empty').classList.toggle('hidden', state.volume.solidCount > 0);
+      refreshEmptyViewport();
+      markModeChips();
+      refreshView2dEmpty();
+      refreshView2dReadout();
+      drawView2d();
       updateStats(state.lastStats, faces);
       updateZoomLabel();
       updateFramePreview();
@@ -2638,6 +3493,15 @@ function nextFrame() {
 }
 
 function frame() {
+  // While a drawing is on screen `#gl` is `display: none`, so its clientWidth
+  // is zero: resizing it now would shrink the drawing buffer to 1x1 and a
+  // build landing in this mode would fit the camera to a one-pixel viewport.
+  // Nothing about the model changes here, so the loop simply steps over it.
+  if (state.mode === '2d') {
+    if (view2dNeedsResize()) drawView2d();
+    requestAnimationFrame(frame);
+    return;
+  }
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   if (renderer.resize(dpr)) state.dirty = true;
   if (state.geometryDirty && state.volume) {
@@ -2678,7 +3542,7 @@ function loadDemo() {
     autoGrid();
     refreshSlots();
     build();
-  });
+  }, undefined, true);
 }
 
 // ------------------------------------------------------- theme & language
@@ -2710,6 +3574,7 @@ function refreshLanguageButton() {
 function retranslate() {
   applyTranslations();
   buildPitchPresets();
+  buildModeChips();
   buildAngleChips();
   buildToolBar();
   refreshSlots();
@@ -2723,6 +3588,11 @@ function retranslate() {
   refreshVoxAvailability();
   refreshSelectionPanel();
   refreshMapPanel();
+  // Every one of these writes a translated string by hand: view names inside a
+  // list, a size against a grid, a price in seconds.
+  refreshViewsAhead();
+  refreshView2dEmpty();
+  refreshView2dReadout();
   updateZoomLabel();
   renderStatus();
   updateStats(state.lastStats, renderer.instanceCount);
@@ -2736,11 +3606,17 @@ function init() {
   setLang(getLang());
 
   buildSlots();
+  buildModeChips();
   buildAngleChips();
   buildToolBar();
   buildPitchPresets();
   wirePitchPresets();
   setupPointer();
+  setupPointer2d();
+  // A `view` entry names a slot, not an image: the slot's drawing is replaced
+  // whole by a projection, a blank sheet or a dropped file, and the stack must
+  // never write into a picture nobody is looking at.
+  state.history.viewSource = (name) => /** @type {any} */ (state.views.get(name)?.image ?? null);
   applyTranslations();
   refreshLanguageButton();
 
@@ -2819,6 +3695,41 @@ function init() {
     focusSwatch(slot);
   });
 
+  // The new pair is one radio group too: one tab stop, arrows inside it
+  // (`docs/DESIGN.md` section 6, rule 6).
+  $('mode-chips').addEventListener('keydown', (e) => {
+    const k = /** @type {KeyboardEvent} */ (e).key;
+    let want = null;
+    if (k === 'ArrowRight' || k === 'ArrowDown' || k === 'End') want = '2d';
+    else if (k === 'ArrowLeft' || k === 'ArrowUp' || k === 'Home') want = '3d';
+    else return;
+    e.preventDefault();
+    setMode(/** @type {any} */ (want));
+    /** @type {HTMLElement|null} */
+    ($('mode-chips').querySelector('[data-mode="' + state.mode + '"]'))?.focus();
+  });
+
+  // ... and so is the row beside it - the five angles, or the six drawings.
+  // Clicking is what a chip does; the keys only choose which chip that is, so
+  // there is one description of what each chip means, not two.
+  $('angle-chips').addEventListener('keydown', (e) => {
+    const buttons = /** @type {NodeListOf<HTMLButtonElement>} */
+      ($('angle-chips').querySelectorAll('button'));
+    if (buttons.length === 0) return;
+    const k = /** @type {KeyboardEvent} */ (e).key;
+    let cur = [...buttons].findIndex((b) => b.tabIndex === 0);
+    if (cur < 0) cur = 0;
+    let next;
+    if (k === 'ArrowRight' || k === 'ArrowDown') next = Math.min(buttons.length - 1, cur + 1);
+    else if (k === 'ArrowLeft' || k === 'ArrowUp') next = Math.max(0, cur - 1);
+    else if (k === 'Home') next = 0;
+    else if (k === 'End') next = buttons.length - 1;
+    else return;
+    e.preventDefault();
+    buttons[next].click();
+    buttons[next].focus();
+  });
+
   // The toolbar is one radio group, so the arrows move the choice inside it.
   $('tool-bar').addEventListener('keydown', (e) => {
     const ids = TOOL_BUTTONS.map((b) => b.id);
@@ -2887,6 +3798,9 @@ function init() {
     guardRebuild(build, () => { box.checked = !box.checked; });
   });
 
+  $('btn-view-take').addEventListener('click', takeDrawingFromModel);
+  $('btn-view-blank').addEventListener('click', makeBlankDrawing);
+
   $('btn-demo').addEventListener('click', loadDemo);
   $('btn-demo-2').addEventListener('click', loadDemo);
   $('btn-clear').addEventListener('click', () => {
@@ -2894,7 +3808,7 @@ function init() {
       state.views.clear();
       refreshSlots();
       build();
-    });
+    }, undefined, true);
   });
   $('btn-build').addEventListener('click', () => guardRebuild(build));
   $('btn-autofit').addEventListener('click', () => {
@@ -2909,6 +3823,10 @@ function init() {
     const previous = String(state.gridSize);
     guardRebuild(() => {
       state.gridSize = +select.value;
+      // Both the blank sheet's size and the price of a projection are read off
+      // the grid, so the invitation has to be told.
+      refreshView2dEmpty();
+      refreshView2dReadout();
       build();
     }, () => { select.value = previous; });
   });
@@ -2923,7 +3841,11 @@ function init() {
   $('map-toggle').addEventListener('change', (e) => {
     setMapMode(/** @type {HTMLInputElement} */ (e.target).checked);
   });
-  $('bounds-toggle').addEventListener('change', () => { state.dirty = true; });
+  // The one checkbox draws the cell grid in both modes.
+  $('bounds-toggle').addEventListener('change', () => {
+    state.dirty = true;
+    drawView2d();
+  });
 
   $('zoom-in').addEventListener('click', () => zoomBy(1));
   $('zoom-out').addEventListener('click', () => zoomBy(-1));
@@ -3035,12 +3957,28 @@ function init() {
       }
     }
 
-    const idx = '12345'.indexOf(e.key);
-    if (idx >= 0) {
-      camera.yaw = ANGLE_CHIPS[idx].yaw * DEG;
-      state.dirty = true;
-      markActiveChip();
+    // P for picture. Free; M was left alone because it asks to mean "mirror".
+    if (e.key === 'p' || e.key === 'P') {
+      setMode(state.mode === '2d' ? '3d' : '2d');
       return;
+    }
+
+    // The same row of chips, the same digits: five camera angles while the
+    // model is on screen, the six drawings while one of them is (spec 8).
+    if (state.mode === '2d') {
+      const v = '123456'.indexOf(e.key);
+      if (v >= 0) {
+        showView2d(VIEW_NAMES[v]);
+        return;
+      }
+    } else {
+      const idx = '12345'.indexOf(e.key);
+      if (idx >= 0) {
+        camera.yaw = ANGLE_CHIPS[idx].yaw * DEG;
+        state.dirty = true;
+        markActiveChip();
+        return;
+      }
     }
 
     if (e.key === '[' || e.key === ']') {
@@ -3083,6 +4021,7 @@ function init() {
 
   refreshToolControls();
   refreshMapPanel();
+  refreshViewsAhead();
   // The grid's threshold is written under its checkbox from the first frame,
   // not only once a model has been built.
   updateZoomLabel();

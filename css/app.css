@@ -173,6 +173,10 @@ h1, h2 { margin: 0; font-weight: 600; }
 .slot.dragover { border-color: var(--accent); background: var(--bg-sunken); box-shadow: inset 0 0 0 999px rgba(100, 210, 179, 0.09); }
 .slot.filled { border-style: solid; }
 .slot.disabled { opacity: .4; }
+/* Painted here since the last build: the model is behind this drawing, and the
+   border is the only quiet place to say which of six thumbnails it is
+   (screen spec §10.2 - a count in 20 px is forbidden by the panel's own rule). */
+.slot.edited { border-style: solid; border-color: var(--warn); }
 
 .slot-name {
   font-size: 10px;
@@ -347,6 +351,68 @@ button.linkish {
   cursor: grab;
 }
 #gl.dragging { cursor: grabbing; }
+#gl.hidden { display: none; }
+
+/*
+ * The drawing surface. Same box as #gl and mutually exclusive with it: one of
+ * the two is `hidden`, so the viewport is either the model or the picture and
+ * never an ambiguous overlap.
+ */
+#view2d {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+  image-rendering: pixelated;
+  cursor: grab;
+}
+#view2d.hidden { display: none; }
+#view2d.dragging { cursor: grabbing; }
+#view2d.tool-paint, #view2d.tool-fill { cursor: crosshair; }
+#view2d.tool-erase { cursor: cell; }
+#view2d.tool-pick { cursor: copy; }
+
+/* Two radio groups stand side by side in the overlay for the first time. A
+   hairline keeps them from reading as one row of eight buttons. */
+.chip-groups {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  pointer-events: auto;
+}
+/* The pair never breaks across two lines on its own: it is what says which of
+   the two viewports is on, and half of it on a second row reads as a stray
+   button (screen spec 3.5). The six view chips wrap instead. */
+#mode-chips { flex-wrap: nowrap; flex: 0 0 auto; }
+.chip-divider {
+  width: 1px;
+  height: 14px;
+  margin-top: 4px;
+  background: var(--line);
+  flex: 0 0 auto;
+}
+
+.view2d-empty-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  pointer-events: auto;
+}
+
+/* The drawing's size against the grid, one line above the status bar. */
+#view2d-readout {
+  position: absolute;
+  left: 0; right: 0;
+  /* Clear of the progress bar, which sits at 22px and is 2px tall: a
+     projection at 512 draws both at once. */
+  bottom: 26px;
+  padding: 0 10px;
+  pointer-events: none;
+}
+#view2d-readout:empty { display: none; }
 
 .viewport-overlay {
   position: absolute;

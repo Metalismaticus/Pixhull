@@ -9,7 +9,12 @@
  * Each entry stores the before and after state of only the voxels the stroke
  * touched, so a one-voxel dab costs eight bytes and dragging across a model
  * costs a few kilobytes, rather than snapshotting the whole volume.
+ *
+ * The stack also carries strokes on the *drawings*, which are neither voxels
+ * nor palette entries and undo into a slot rather than into the model.
  */
+
+import { imageToken, pasteRect } from './draw2d.js';
 
 /**
  * @typedef {Object} VoxelState
@@ -47,6 +52,23 @@ function writeVoxel(vol, x, y, z, s) {
  */
 
 /**
+ * One stroke on a drawing: the patch of pixels it changed, as it was and as it
+ * is. Its own kind because it touches neither voxels nor palette values - a
+ * voxel entry has nowhere to keep it (screen specification
+ * `docs/specs/2026-09-24-3-view-editing-2d-3d.md`, section 10.4).
+ *
+ * `token` names the very image the stroke was recorded on (`imageToken`).
+ * The slot name alone is not enough and neither is the size: emptying a slot
+ * and starting a blank sheet at the grid's size puts another picture of exactly
+ * the same dimensions under the same name, and an undo matched by size would
+ * paint it with pixels that were never in it.
+ * @typedef {{kind: 'view', name: string, token: number,
+ *   width: number, height: number,
+ *   rect: {x: number, y: number, w: number, h: number},
+ *   before: Uint8ClampedArray, after: Uint8ClampedArray}} ViewEntry
+ */
+
+/**
  * One undoable step. Entries are tagged because the stack carries unrelated
  * kinds of change, and undo has to know which object to write to.
  *
@@ -56,7 +78,8 @@ function writeVoxel(vol, x, y, z, s) {
  * @typedef {{kind: 'voxels', map: StrokeMap}
  *   | {kind: 'palette', index: number, before: number, after: number}
  *   | {kind: 'merge', remap: Uint8Array, record: FaceRecord,
- *      before: PaletteState, after: PaletteState}} Entry
+ *      before: PaletteState, after: PaletteState}
+ *   | ViewEntry} Entry
  */
 
 export class History {
@@ -79,6 +102,24 @@ export class History {
      * @type {number | null}
      */
     this.paletteDrag = null;
+    /**
+     * Where to find the drawing a `view` entry names, or null when it is gone.
+     *
+     * The stack cannot hold the image itself: a slot's drawing is replaced
+     * whole when it is taken from the model, started blank or dropped in from a
+     * file, and an entry pointing at the old object would undo into a picture
+     * nobody is looking at. The owner of the slots answers instead, and a
+     * drawing that is not the object the entry was recorded on is refused
+     * rather than written over.
+     * @type {(name: string) => {width: number, height: number, data: Uint8ClampedArray} | null}
+     */
+    this.viewSource = () => null;
+    /**
+     * The view the last `view` step wrote into, so the caller can refresh that
+     * one drawing rather than declaring all six behind the model.
+     * @type {string | null}
+     */
+    this.lastView = null;
   }
 
   get canUndo() {
@@ -99,7 +140,36 @@ export class History {
    * which is right - there is then nothing left to lose.
    */
   get hasEdits() {
-    return this.cursor > 0 || !!(this.pending && this.pending.size > 0);
+    if (this.pending && this.pending.size > 0) return true;
+    // A stroke on a *drawing* is not work a rebuild throws away - the rebuild
+    // is what the drawing is waiting for. Asking "you will lose your edits"
+    // before carving the very pixels the artist just painted would be the
+    // guard fighting its own purpose (screen specification, section 4.4).
+    for (let i = 0; i < this.cursor; i++) if (this.stack[i].kind !== 'view') return true;
+    return false;
+  }
+
+  /**
+   * Has the user painted on a drawing since the last clear()?
+   *
+   * A separate question from `hasEdits` on purpose. A rebuild is what a painted
+   * drawing is *waiting* for, so it must not ask (section 4.4) - but an action
+   * that throws the drawing itself away (Demo, Clear, loading a project,
+   * dropping a new PNG into the slot, emptying it) destroys exactly this work,
+   * and must.
+   *
+   * Only steps at or before the cursor count, like `hasEdits`: a stroke undone
+   * back to nothing is nothing left to lose.
+   *
+   * @param {string} [name] ask about one slot only; omit for any of the six
+   * @returns {boolean}
+   */
+  hasViewEdits(name) {
+    for (let i = 0; i < this.cursor; i++) {
+      const e = this.stack[i];
+      if (e.kind === 'view' && (name === undefined || e.name === name)) return true;
+    }
+    return false;
   }
 
   /**
@@ -156,6 +226,39 @@ export class History {
     this.paletteDrag = null;
   }
 
+  /**
+   * Record a finished stroke on a drawing, as `ViewStroke.finish()` built it.
+   *
+   * One entry per stroke, exactly like a stroke on the model: nobody wants to
+   * press undo once per pixel of a drag.
+   * @param {ViewEntry} entry
+   */
+  pushView(entry) {
+    this.stack.length = this.cursor; // a new step drops the redo tail
+    this.stack.push(entry);
+    if (this.stack.length > this.limit) this.stack.shift();
+    this.cursor = this.stack.length;
+    this.paletteDrag = null;
+  }
+
+  /**
+   * Write one side of a `view` entry back into the drawing it names.
+   * @param {ViewEntry} entry
+   * @param {'before'|'after'} side
+   * @returns {boolean} false when the drawing is gone or a different size
+   */
+  #writeView(entry, side) {
+    const img = this.viewSource(entry.name);
+    // Identity, not shape: a different drawing of the same size is a different
+    // drawing, and writing a patch into it would silently repaint a picture the
+    // stroke never touched.
+    if (!img || imageToken(img) !== entry.token) return false;
+    if (img.width !== entry.width || img.height !== entry.height) return false;
+    pasteRect(img, entry.rect, entry[side]);
+    this.lastView = entry.name;
+    return true;
+  }
+
   /** Open a stroke. Safe to call when one is already open. */
   begin() {
     if (!this.pending) this.pending = new Map();
@@ -204,13 +307,19 @@ export class History {
   /**
    * @param {import('../core/volume.js').Volume} vol
    * @param {import('../core/palette.js').Palette} [palette]
-   * @returns {'voxels'|'palette'|'merge'|null} what was undone, so the caller
-   *   knows whether geometry, only the palette texture, or both have to be
-   *   refreshed
+   * @returns {'voxels'|'palette'|'merge'|'view'|null} what was undone, so the
+   *   caller knows whether geometry, only the palette texture, both, or a
+   *   drawing have to be refreshed
    */
   undo(vol, palette) {
     if (!this.canUndo) return null;
     const entry = this.stack[this.cursor - 1];
+    if (entry.kind === 'view') {
+      if (!this.#writeView(entry, 'before')) return null;
+      this.cursor--;
+      this.paletteDrag = null;
+      return 'view';
+    }
     if (entry.kind === 'merge') {
       if (!palette) return null;
       this.cursor--;
@@ -228,6 +337,7 @@ export class History {
       this.paletteDrag = null;
       return 'palette';
     }
+    if (!vol) return null;
     this.cursor--;
     for (const e of entry.map.values()) writeVoxel(vol, e.x, e.y, e.z, e.before);
     this.paletteDrag = null;
@@ -237,11 +347,17 @@ export class History {
   /**
    * @param {import('../core/volume.js').Volume} vol
    * @param {import('../core/palette.js').Palette} [palette]
-   * @returns {'voxels'|'palette'|'merge'|null}
+   * @returns {'voxels'|'palette'|'merge'|'view'|null}
    */
   redo(vol, palette) {
     if (!this.canRedo) return null;
     const entry = this.stack[this.cursor];
+    if (entry.kind === 'view') {
+      if (!this.#writeView(entry, 'after')) return null;
+      this.cursor++;
+      this.paletteDrag = null;
+      return 'view';
+    }
     if (entry.kind === 'merge') {
       if (!palette) return null;
       this.cursor++;
@@ -259,6 +375,7 @@ export class History {
       this.paletteDrag = null;
       return 'palette';
     }
+    if (!vol) return null;
     this.cursor++;
     for (const e of entry.map.values()) writeVoxel(vol, e.x, e.y, e.z, e.after);
     this.paletteDrag = null;

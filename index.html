@@ -77,6 +77,9 @@
     <p class="hint" id="grid-hint" data-i18n="grid.hint"></p>
 
     <button id="btn-build" class="primary" type="button" data-i18n="grid.build"></button>
+    <!-- Only while a drawing is ahead of the model: painting a view never
+         rebuilds (screen spec §4.4), so the panel has to say so out loud. -->
+    <p class="hint warn hidden" id="views-ahead"></p>
 
     <h2 data-i18n="edit.heading"></h2>
     <div class="toolbar" id="tool-bar" role="radiogroup" data-i18n-aria="edit.heading"></div>
@@ -144,9 +147,16 @@
   <!-- ------------------------------------------------------------------ -->
   <section class="viewport">
     <canvas id="gl" aria-label="3D model viewport"></canvas>
+    <!-- The drawing mode's own surface: a flat picture drawn with drawImage,
+         not a second WebGL pipeline for something one line already does. -->
+    <canvas id="view2d" class="hidden" aria-label="Drawing viewport"></canvas>
 
     <div class="viewport-overlay">
-      <div class="angle-chips" id="angle-chips"></div>
+      <div class="chip-groups">
+        <div class="angle-chips" id="mode-chips" role="radiogroup" data-i18n-aria="view.heading"></div>
+        <span class="chip-divider" aria-hidden="true"></span>
+        <div class="angle-chips" id="angle-chips"></div>
+      </div>
       <div class="zoom-chip">
         <button id="zoom-out" type="button" data-i18n-aria="viewport.zoomOut">−</button>
         <span id="zoom-label">4×</span>
@@ -158,6 +168,20 @@
       <p data-i18n="viewport.emptyTitle"></p>
       <p class="hint"><span data-i18n="viewport.emptyHintBefore"></span><button id="btn-demo-2" class="linkish" type="button" data-i18n="viewport.emptyHintLink"></button><span data-i18n="viewport.emptyHintAfter"></span></p>
     </div>
+
+    <!-- Same centre and same class as the 3D invitation: one pattern for
+         "there is nothing here yet, and here is what to do about it". -->
+    <div id="view2d-empty" class="viewport-empty hidden">
+      <p id="view2d-empty-title"></p>
+      <p class="hint view2d-empty-actions">
+        <button id="btn-view-take" class="ghost small" type="button"></button>
+        <button id="btn-view-blank" class="ghost small" type="button"></button>
+      </p>
+      <p class="hint" id="view2d-empty-cost"></p>
+      <p class="hint" id="view2d-empty-note"></p>
+    </div>
+
+    <p class="readout" id="view2d-readout"></p>
 
     <div id="build-progress" class="progress hidden" role="progressbar"
          aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" data-i18n-aria="build.progress">

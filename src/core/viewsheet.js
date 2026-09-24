@@ -51,13 +51,35 @@ const COLUMNS = 3;
  * @returns {RgbaImage} the full grid, transparent where the ray missed
  */
 export function projectView(volume, palette, name) {
+  const N = volume.nx;
+  if (volume.ny !== N || volume.nz !== N) throw new Error('projection wants a cubic grid');
+  const out = new Uint8ClampedArray(N * N * 4);
+  projectViewRows(volume, palette, name, 0, N, out);
+  return { width: N, height: N, data: out };
+}
+
+/**
+ * One horizontal band of `projectView`, so a caller that has to stay responsive
+ * can spread the walk over several frames and say how far it has got.
+ *
+ * Exactly the same loop, not a second implementation: `projectView` is this
+ * function over the whole range. At 512 the walk costs about two seconds, which
+ * `docs/DESIGN.md` §6 says has to show a progress bar, and a bar cannot be
+ * drawn from inside a loop that never yields.
+ *
+ * @param {import('./volume.js').Volume} volume
+ * @param {import('./palette.js').Palette} palette
+ * @param {string} name one of VIEW_NAMES
+ * @param {number} v0 first row, inclusive
+ * @param {number} v1 last row, exclusive
+ * @param {Uint8ClampedArray} out N*N*4 bytes, written in place
+ */
+export function projectViewRows(volume, palette, name, v0, v1, out) {
   const geom = VIEW_GEOM[name];
   if (!geom) throw new Error('unknown view: ' + name);
   const N = volume.nx;
-  if (volume.ny !== N || volume.nz !== N) throw new Error('projection wants a cubic grid');
 
-  const out = new Uint8ClampedArray(N * N * 4);
-  for (let v = 0; v < N; v++) {
+  for (let v = v0; v < v1; v++) {
     for (let u = 0; u < N; u++) {
       for (let d = 0; d < N; d++) {
         const [x, y, z] = geom.ray(u, v, d, N);
@@ -73,7 +95,6 @@ export function projectView(volume, palette, name) {
       }
     }
   }
-  return { width: N, height: N, data: out };
 }
 
 /**
