@@ -33,7 +33,7 @@ src/export/     спрайты, OBJ, glTF, .vox, surface nets, zip
 src/ui/         декодирование картинок, тема
 mcp/            MCP-сервер на stdio: тот же карвинг из Node
 tools/          check.mjs, mcp-smoke.mjs, serve.mjs
-tests/          полигон: run.mjs, fixtures.mjs, группы carve/edit/export/map/palette/views/i18n/perf
+tests/          полигон: run.mjs, fixtures.mjs, группы bake/carve/edit/export/map/palette/sheet/views/i18n/perf
 assets/         иконки
 docs/           документация проекта
 docs/orders     виды заказов: стиль, постоянная часть промта, формат, исполнитель
@@ -44,9 +44,9 @@ docs/prompts    готовые заказы по партиям
 
 ```bash
 node tools/serve.mjs 5173     # продукт: http://localhost:5173
-node tools/check.mjs          # быстрая: импортирует все 41 модуль
+node tools/check.mjs          # быстрая: импортирует все 47 модулей
 node tools/mcp-smoke.mjs      # сквозной прогон MCP: карвинг и все экспорты
-node tests/run.mjs            # полигон: 35 проверок поведения
+node tests/run.mjs            # полигон: 42 проверки поведения
 node tests/run.mjs perf/      # долгая группа, без аргумента она пропускается
 ```
 
